@@ -1,0 +1,8 @@
+.env*
+/s2
+/dist
+*.exe
+.DS_Store
+.idea/
+.vscode/
+*.swp
