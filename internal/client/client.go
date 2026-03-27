@@ -83,37 +83,6 @@ func (c *Client) Validate() error {
 	return nil
 }
 
-// TokenID returns the token_id for the current Bearer token by calling /api/me.
-// Returns empty string if authenticated via cookie (non-token auth).
-func (c *Client) TokenID() (string, error) {
-	req, err := http.NewRequest("GET", c.url("/api/me"), nil)
-	if err != nil {
-		return "", err
-	}
-	c.setAuth(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("connection failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return "", fmt.Errorf("invalid or expired token")
-	}
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
-	}
-
-	var result struct {
-		TokenID string `json:"token_id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to parse /api/me response: %w", err)
-	}
-	return result.TokenID, nil
-}
-
 // --- File Operations -------------------------------------------------------
 
 // ListObject represents a remote file.
