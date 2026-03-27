@@ -244,7 +244,7 @@ func (c *Client) DeleteObject(key string) error {
 // ChangeEvent represents a single change from the change_log.
 type ChangeEvent struct {
 	Seq       int64  `json:"seq"`
-	ClientID  string `json:"client_id"`
+	TokenID   string `json:"token_id"`
 	Path      string `json:"path"`
 	Action    string `json:"action"`
 	Size      *int64 `json:"size"`
