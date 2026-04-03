@@ -1,19 +1,34 @@
 // Package client provides the S2 REST API client.
 //
-// All file operations use the /api/files/ REST endpoint.
-// Change log operations use /api/changes.
+// All methods correspond to the public OpenAPI spec (GET /api/openapi.yaml).
 // Authentication is via Bearer token in the Authorization header.
 package client
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
+	"github.com/selfbase-dev/s2-cli/internal/types"
+)
+
+// Sentinel errors.
+var (
+	ErrPreconditionFailed = fmt.Errorf("precondition failed: resource was modified")
+	ErrConflict           = fmt.Errorf("conflict: resource already exists")
+	ErrCursorGone         = fmt.Errorf("cursor gone: full resync required")
+	ErrNotFound           = fmt.Errorf("not found")
+	ErrForbidden          = fmt.Errorf("forbidden")
+	ErrUnauthorized       = fmt.Errorf("unauthorized: invalid or expired token")
+	ErrStorageLimitExceeded = fmt.Errorf("storage limit exceeded")
 )
 
 // Client talks to the S2 REST API.
@@ -30,6 +45,16 @@ func New(endpoint, token string) *Client {
 	retryClient.RetryWaitMin = 500 * time.Millisecond
 	retryClient.RetryWaitMax = 5 * time.Second
 	retryClient.Logger = nil
+	// Don't retry on 4xx errors (they won't succeed on retry)
+	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if err != nil {
+			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+		}
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return false, nil
+		}
+		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+	}
 
 	return &Client{
 		endpoint:   strings.TrimRight(endpoint, "/"),
@@ -46,74 +71,79 @@ func (c *Client) url(path string) string {
 	return c.endpoint + path
 }
 
-func (c *Client) filesURL(key string) string {
-	return c.endpoint + "/api/files/" + key
+func (c *Client) filesURL(path string) string {
+	return c.endpoint + "/api/files/" + path
 }
 
-// --- Errors ----------------------------------------------------------------
+// checkStatus maps common HTTP status codes to sentinel errors.
+func checkStatus(resp *http.Response) error {
+	switch resp.StatusCode {
+	case 401:
+		return ErrUnauthorized
+	case 403:
+		return ErrForbidden
+	case 404:
+		return ErrNotFound
+	case 409:
+		return ErrConflict
+	case 410:
+		return ErrCursorGone
+	case 412:
+		return ErrPreconditionFailed
+	case 413:
+		return ErrStorageLimitExceeded
+	}
+	return nil
+}
 
-// ErrPreconditionFailed is returned when If-Match fails (412).
-var ErrPreconditionFailed = fmt.Errorf("precondition failed: object was modified")
+// readErrorBody reads the response body for error context.
+func readErrorBody(resp *http.Response) string {
+	body, _ := io.ReadAll(resp.Body)
+	return string(body)
+}
 
-// ErrCursorInvalid is returned when the cursor has been pruned (410 Gone).
-var ErrCursorInvalid = fmt.Errorf("cursor invalid: pruned by server, full resync required")
+// --- Auth ---
 
-// --- Validate --------------------------------------------------------------
-
-// Validate checks that the token is valid by calling /api/me.
-func (c *Client) Validate() error {
+// Me returns the auth context for the current token.
+func (c *Client) Me() (*types.MeTokenResponse, error) {
 	req, err := http.NewRequest("GET", c.url("/api/me"), nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("connection failed: %w", err)
+		return nil, fmt.Errorf("connection failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return fmt.Errorf("invalid or expired token")
+	if err := checkStatus(resp); err != nil {
+		return nil, err
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
-	}
-	return nil
-}
-
-// --- File Operations -------------------------------------------------------
-
-// ListObject represents a remote file.
-type ListObject struct {
-	Key          string
-	Size         int64
-	LastModified string
-	ETag         string // R2 native ETag (used for change detection)
-}
-
-// listResponse is the JSON shape returned by GET /api/files/{prefix}/.
-type listResponse struct {
-	Items []listItem `json:"items"`
-}
-
-type listItem struct {
-	Key      string `json:"key"`
-	Size     int64  `json:"size"`
-	Uploaded string `json:"uploaded"`
-	Hash     string `json:"hash"`
-}
-
-// ListAll lists all objects under the given prefix.
-func (c *Client) ListAll(prefix string) ([]ListObject, error) {
-	// Ensure prefix ends with / for directory listing
-	p := prefix
-	if p != "" && !strings.HasSuffix(p, "/") {
-		p += "/"
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
-	req, err := http.NewRequest("GET", c.filesURL(p), nil)
+	var me types.MeTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
+		return nil, fmt.Errorf("failed to parse /api/me response: %w", err)
+	}
+	return &me, nil
+}
+
+// --- File Operations ---
+
+// ListDir lists files in a directory. Path should end with "/" for directories.
+// Empty path lists the root directory.
+func (c *Client) ListDir(path string) (*types.ListResponse, error) {
+	if path == "" || path == "/" {
+		path = "" // root listing: /api/files/ (not /api/files//)
+	} else if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+
+	req, err := http.NewRequest("GET", c.filesURL(path), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -125,103 +155,200 @@ func (c *Client) ListAll(prefix string) ([]ListObject, error) {
 	}
 	defer resp.Body.Close()
 
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("list failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("list failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
-	var result listResponse
+	var result types.ListResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to parse list response: %w", err)
 	}
-
-	objects := make([]ListObject, len(result.Items))
-	for i, item := range result.Items {
-		objects[i] = ListObject{
-			Key:          item.Key,
-			Size:         item.Size,
-			LastModified: item.Uploaded,
-			ETag:         item.Hash,
-		}
-	}
-	return objects, nil
+	return &result, nil
 }
 
-// GetObject downloads a file. Returns the body, ETag, and any error.
-// Caller must close the body.
-func (c *Client) GetObject(key string) (io.ReadCloser, string, error) {
-	req, err := http.NewRequest("GET", c.filesURL(key), nil)
+// ListAllRecursive lists all files under a prefix recursively.
+// Returns a map of relative path → RemoteFile.
+func (c *Client) ListAllRecursive(prefix string) (map[string]types.RemoteFile, error) {
+	result := make(map[string]types.RemoteFile)
+	if err := c.listRecursive(prefix, "", result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (c *Client) listRecursive(prefix, relDir string, result map[string]types.RemoteFile) error {
+	path := prefix
+	if relDir != "" {
+		path = prefix + relDir
+	}
+
+	listing, err := c.ListDir(path)
 	if err != nil {
-		return nil, "", err
+		return err
+	}
+
+	for _, item := range listing.Items {
+		relPath := relDir + item.Name
+		if item.Type == "directory" {
+			if err := c.listRecursive(prefix, relPath+"/", result); err != nil {
+				return err
+			}
+		} else {
+			size := int64(0)
+			if item.Size != nil {
+				size = *item.Size
+			}
+			result[relPath] = types.RemoteFile{
+				Name:       item.Name,
+				Size:       size,
+				ModifiedAt: item.ModifiedAt,
+			}
+		}
+	}
+	return nil
+}
+
+// DownloadResult contains the result of a file download.
+type DownloadResult struct {
+	Body           io.ReadCloser
+	ContentVersion int64
+	Size           int64
+	ContentType    string
+}
+
+// Download downloads a file. Caller must close Body.
+func (c *Client) Download(path string) (*DownloadResult, error) {
+	req, err := http.NewRequest("GET", c.filesURL(path), nil)
+	if err != nil {
+		return nil, err
 	}
 	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("get failed: %w", err)
+		return nil, fmt.Errorf("download failed: %w", err)
 	}
 
-	if resp.StatusCode == 404 {
+	if err := checkStatus(resp); err != nil {
 		resp.Body.Close()
-		return nil, "", fmt.Errorf("not found: %s", key)
+		return nil, err
 	}
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body := readErrorBody(resp)
 		resp.Body.Close()
-		return nil, "", fmt.Errorf("get failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, body)
 	}
 
-	etag := strings.Trim(resp.Header.Get("ETag"), "\"")
-	return resp.Body, etag, nil
+	cv, _ := ParseContentVersion(resp.Header.Get("ETag"))
+	size, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+
+	return &DownloadResult{
+		Body:           resp.Body,
+		ContentVersion: cv,
+		Size:           size,
+		ContentType:    resp.Header.Get("Content-Type"),
+	}, nil
 }
 
-// putResponse is the JSON shape returned by PUT /api/files/*.
-type putResponse struct {
-	Size int64  `json:"size"`
-	Hash string `json:"hash"`
-	ETag string `json:"etag"`
-}
-
-// PutObject uploads a file. If ifMatch is non-empty, sends If-Match header
-// for optimistic locking. Returns the new ETag (R2 native).
-func (c *Client) PutObject(key string, body io.Reader, ifMatch string) (string, error) {
-	req, err := http.NewRequest("PUT", c.filesURL(key), body)
+// HeadFile returns the content version and size without downloading.
+func (c *Client) HeadFile(path string) (contentVersion int64, size int64, err error) {
+	req, err := http.NewRequest("HEAD", c.filesURL(path), nil)
 	if err != nil {
-		return "", err
+		return 0, 0, err
 	}
 	c.setAuth(req)
-	if ifMatch != "" {
-		if !strings.HasPrefix(ifMatch, "\"") {
-			ifMatch = "\"" + ifMatch + "\""
-		}
-		req.Header.Set("If-Match", ifMatch)
-	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("put failed: %w", err)
+		return 0, 0, fmt.Errorf("head failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 412 {
-		return "", ErrPreconditionFailed
+	if err := checkStatus(resp); err != nil {
+		return 0, 0, err
 	}
-	if resp.StatusCode != 200 && resp.StatusCode != 201 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("put failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result putResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to parse put response: %w", err)
+	if resp.StatusCode != 200 {
+		return 0, 0, fmt.Errorf("head failed with status %d", resp.StatusCode)
 	}
 
-	return result.ETag, nil
+	cv, _ := ParseContentVersion(resp.Header.Get("ETag"))
+	sz, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+	return cv, sz, nil
 }
 
-// DeleteObject deletes a file.
-func (c *Client) DeleteObject(key string) error {
-	req, err := http.NewRequest("DELETE", c.filesURL(key), nil)
+// Upload uploads a file. Returns the upload result with content version.
+// ifMatchVersion > 0 sends If-Match for CAS update.
+// ifMatchVersion == 0 sends If-None-Match: * for create-only.
+// ifMatchVersion < 0 sends no conditional headers (force overwrite).
+func (c *Client) Upload(path string, body io.Reader, contentType string, ifMatchVersion int64) (*types.UploadResult, error) {
+	req, err := http.NewRequest("PUT", c.filesURL(path), body)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	if ifMatchVersion > 0 {
+		req.Header.Set("If-Match", FormatETag(ifMatchVersion))
+	} else if ifMatchVersion == 0 {
+		req.Header.Set("If-None-Match", "*")
+	}
+	// ifMatchVersion < 0: no conditional headers
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("upload failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 201 && resp.StatusCode != 200 {
+		return nil, fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var result types.UploadResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to parse upload response: %w", err)
+	}
+	return &result, nil
+}
+
+// Mkdir creates a directory.
+func (c *Client) Mkdir(path string) error {
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	req, err := http.NewRequest("PUT", c.filesURL(path), nil)
+	if err != nil {
+		return err
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("mkdir failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return err
+	}
+	if resp.StatusCode != 201 && resp.StatusCode != 200 {
+		return fmt.Errorf("mkdir failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+	return nil
+}
+
+// Delete deletes a file (soft delete to trash).
+func (c *Client) Delete(path string) error {
+	req, err := http.NewRequest("DELETE", c.filesURL(path), nil)
 	if err != nil {
 		return err
 	}
@@ -233,29 +360,186 @@ func (c *Client) DeleteObject(key string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 204 && resp.StatusCode != 200 {
-		return fmt.Errorf("delete failed with status %d", resp.StatusCode)
+	if err := checkStatus(resp); err != nil {
+		return err
+	}
+	if resp.StatusCode != 204 {
+		return fmt.Errorf("delete failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 	return nil
 }
 
-// --- Change Log API --------------------------------------------------------
+// Move moves or renames a file/directory.
+func (c *Client) Move(srcPath, dstPath string, overwrite bool) error {
+	payload := struct {
+		Destination string `json:"destination"`
+		Overwrite   bool   `json:"overwrite,omitempty"`
+	}{
+		Destination: dstPath,
+		Overwrite:   overwrite,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
 
-// ChangeEvent represents a single change from the change_log.
-type ChangeEvent struct {
-	Seq       int64  `json:"seq"`
-	TokenID   string `json:"token_id"`
-	Path      string `json:"path"`
-	Action    string `json:"action"`
-	Size      *int64 `json:"size"`
-	Hash      string `json:"hash"`
-	CreatedAt string `json:"created_at"`
+	req, err := http.NewRequest("POST", c.endpoint+"/api/file-moves/"+srcPath, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	c.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("move failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return err
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("move failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+	return nil
 }
 
-// PollChanges fetches change_log events after the given cursor.
-func (c *Client) PollChanges(after int64, limit int) ([]ChangeEvent, error) {
-	url := fmt.Sprintf("%s?after=%d&limit=%d", c.url("/api/changes"), after, limit)
-	req, err := http.NewRequest("GET", url, nil)
+// --- Chunked Upload ---
+
+// CreateUploadSession creates a chunked upload session.
+func (c *Client) CreateUploadSession(path string, totalSize int64, expectedChunks int) (*types.UploadSession, error) {
+	payload := struct {
+		Path           string `json:"path"`
+		TotalSize      *int64 `json:"totalSize,omitempty"`
+		ExpectedChunks *int   `json:"expectedChunks,omitempty"`
+	}{
+		Path: path,
+	}
+	if totalSize > 0 {
+		payload.TotalSize = &totalSize
+	}
+	if expectedChunks > 0 {
+		payload.ExpectedChunks = &expectedChunks
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", c.url("/api/uploads"), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("create upload session failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 201 {
+		return nil, fmt.Errorf("create upload session failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var session types.UploadSession
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		return nil, fmt.Errorf("failed to parse upload session response: %w", err)
+	}
+	return &session, nil
+}
+
+// UploadChunk uploads a single chunk.
+func (c *Client) UploadChunk(sessionID string, chunkIndex int, body io.Reader) error {
+	url := fmt.Sprintf("%s/api/uploads/%s/%d", c.endpoint, sessionID, chunkIndex)
+	req, err := http.NewRequest("PUT", url, body)
+	if err != nil {
+		return err
+	}
+	c.setAuth(req)
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload chunk %d failed: %w", chunkIndex, err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return err
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("upload chunk %d failed with status %d: %s", chunkIndex, resp.StatusCode, readErrorBody(resp))
+	}
+	return nil
+}
+
+// CompleteUpload finalizes a chunked upload session.
+func (c *Client) CompleteUpload(sessionID string) (*types.UploadResult, error) {
+	url := fmt.Sprintf("%s/api/uploads/%s/complete", c.endpoint, sessionID)
+	req, err := http.NewRequest("POST", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("complete upload failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("complete upload failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var result types.UploadResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to parse complete upload response: %w", err)
+	}
+	return &result, nil
+}
+
+// CancelUpload cancels a chunked upload session.
+func (c *Client) CancelUpload(sessionID string) error {
+	url := fmt.Sprintf("%s/api/uploads/%s", c.endpoint, sessionID)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("cancel upload failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 204 {
+		return fmt.Errorf("cancel upload failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// --- Change Log ---
+
+// PollChanges fetches change events after the given cursor.
+func (c *Client) PollChanges(cursor string) (*types.ChangesResponse, error) {
+	reqURL := c.url("/api/changes")
+	if cursor != "" {
+		reqURL += "?after=" + neturl.QueryEscape(cursor)
+	}
+
+	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -267,47 +551,58 @@ func (c *Client) PollChanges(after int64, limit int) ([]ChangeEvent, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 410 {
-		return nil, ErrCursorInvalid
+	if err := checkStatus(resp); err != nil {
+		return nil, err
 	}
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("poll changes failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("poll changes failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
-	var result struct {
-		Changes []ChangeEvent `json:"changes"`
-	}
+	var result types.ChangesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to parse changes response: %w", err)
 	}
-	return result.Changes, nil
+	return &result, nil
 }
 
-// LatestCursor fetches the latest change_log cursor.
-func (c *Client) LatestCursor() (int64, error) {
+// LatestCursor fetches the latest cursor without consuming events.
+func (c *Client) LatestCursor() (string, error) {
 	req, err := http.NewRequest("GET", c.url("/api/changes/latest"), nil)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("latest cursor failed: %w", err)
+		return "", fmt.Errorf("latest cursor failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("latest cursor failed with status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("latest cursor failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
-	var result struct {
-		Latest int64 `json:"latest"`
-	}
+	var result types.LatestCursorResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, fmt.Errorf("failed to parse latest cursor response: %w", err)
+		return "", fmt.Errorf("failed to parse latest cursor response: %w", err)
 	}
-	return result.Latest, nil
+	return result.Cursor, nil
+}
+
+// --- ETag helpers ---
+
+// ParseContentVersion extracts the integer content_version from an ETag header.
+// ETag format: "42" (quoted integer string).
+func ParseContentVersion(etag string) (int64, error) {
+	s := strings.Trim(etag, "\"")
+	if s == "" {
+		return 0, fmt.Errorf("empty ETag")
+	}
+	return strconv.ParseInt(s, 10, 64)
+}
+
+// FormatETag formats a content_version as an ETag header value.
+func FormatETag(contentVersion int64) string {
+	return fmt.Sprintf(`"%d"`, contentVersion)
 }

@@ -14,9 +14,13 @@ type State struct {
 	Version      int                        `json:"version"`
 	RemotePrefix string                     `json:"remote_prefix"`
 	SyncedAt     string                     `json:"synced_at"`
-	Cursor       int64                      `json:"cursor,omitempty"`
+	Cursor       string                     `json:"cursor,omitempty"`
+	TokenID      string                     `json:"token_id,omitempty"`
+	PushedSeqs   []int64                    `json:"pushed_seqs,omitempty"`
 	Files        map[string]types.FileState `json:"files"`
 }
+
+const currentStateVersion = 2
 
 // StateDir returns the .s2 directory path within the sync root.
 func StateDir(syncRoot string) string {
@@ -30,15 +34,13 @@ func StatePath(syncRoot string) string {
 
 // LoadState reads state.json from the sync root.
 // Returns an empty state if the file doesn't exist or is corrupt.
+// If the state version is old (v1), resets to empty (cursor incompatible).
 func LoadState(syncRoot string) (*State, error) {
 	path := StatePath(syncRoot)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &State{
-				Version: 1,
-				Files:   make(map[string]types.FileState),
-			}, nil
+			return newEmptyState(), nil
 		}
 		return nil, err
 	}
@@ -46,10 +48,13 @@ func LoadState(syncRoot string) (*State, error) {
 	var state State
 	if err := json.Unmarshal(data, &state); err != nil {
 		// Corrupt state: treat as first sync
-		return &State{
-			Version: 1,
-			Files:   make(map[string]types.FileState),
-		}, nil
+		return newEmptyState(), nil
+	}
+
+	// v1 → v2 migration: cursor format changed (int64 → opaque string),
+	// ETag changed (hash → content_version). Reset state.
+	if state.Version < currentStateVersion {
+		return newEmptyState(), nil
 	}
 
 	if state.Files == nil {
@@ -65,6 +70,7 @@ func SaveState(syncRoot string, state *State) error {
 		return err
 	}
 
+	state.Version = currentStateVersion
 	state.SyncedAt = time.Now().UTC().Format(time.RFC3339)
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -78,4 +84,38 @@ func SaveState(syncRoot string, state *State) error {
 	}
 
 	return os.Rename(tmpPath, StatePath(syncRoot))
+}
+
+// AddPushedSeq records a seq from a push operation for self-change filtering.
+func (s *State) AddPushedSeq(seq int64) {
+	s.PushedSeqs = append(s.PushedSeqs, seq)
+}
+
+// IsPushedSeq returns true if the seq was recorded as a push from this instance.
+func (s *State) IsPushedSeq(seq int64) bool {
+	for _, ps := range s.PushedSeqs {
+		if ps == seq {
+			return true
+		}
+	}
+	return false
+}
+
+// PrunePushedSeqs removes seqs that are older than the given cursor's minimum seq.
+// Called after polling to clean up stale entries.
+func (s *State) PrunePushedSeqs(minSeq int64) {
+	kept := s.PushedSeqs[:0]
+	for _, seq := range s.PushedSeqs {
+		if seq >= minSeq {
+			kept = append(kept, seq)
+		}
+	}
+	s.PushedSeqs = kept
+}
+
+func newEmptyState() *State {
+	return &State{
+		Version: currentStateVersion,
+		Files:   make(map[string]types.FileState),
+	}
 }
