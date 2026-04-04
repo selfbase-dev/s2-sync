@@ -684,6 +684,77 @@ func TestS31_MaxDeleteAbort(t *testing.T) {
 
 func TestS32_PullDuringLocalEdit(t *testing.T) {
 	markScenario("S32")
-	t.Skip("TODO: timing-dependent — executor has hash check safety but hard to trigger in test")
+	env := newTestEnv(t)
+	env.skipSelfFilter = true
+
+	env.writeLocal("file.txt", "v1")
+	env.sync() // initial sync
+
+	// Remote pushes v2
+	env.putRemote("file.txt", "v2-from-remote")
+
+	// Incremental sync with hook: simulate a concurrent local write
+	// between download and commit.
+	state, err := LoadState(env.localDir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	state.RemotePrefix = env.prefix
+	me, err := env.client.Me()
+	if err != nil {
+		t.Fatalf("Me: %v", err)
+	}
+	state.TokenID = me.TokenID
+
+	exclude := LoadExclude(env.localDir)
+	localFiles, err := Walk(env.localDir, state.Files, exclude)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+
+	resp, err := env.client.PollChanges(state.Cursor)
+	if err != nil {
+		t.Fatalf("PollChanges: %v", err)
+	}
+
+	var remoteChanges []types.ChangeEntry
+	for _, ch := range resp.Changes {
+		normPrefix := "/" + env.prefix
+		if ch.PathBefore != "" {
+			ch.PathBefore = strings.TrimPrefix(ch.PathBefore, normPrefix)
+		}
+		if ch.PathAfter != "" {
+			ch.PathAfter = strings.TrimPrefix(ch.PathAfter, normPrefix)
+		}
+		remoteChanges = append(remoteChanges, ch)
+	}
+
+	plans := CompareIncremental(localFiles, state.Files, remoteChanges)
+
+	localEdited := false
+	result, err := execute(plans, env.localDir, env.prefix, env.client, state, false, executeDeps{
+		beforePullCommit: func(localPath string) {
+			// Simulate concurrent local edit during pull
+			os.WriteFile(localPath, []byte("local-edit-during-pull"), 0644)
+			localEdited = true
+		},
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if !localEdited {
+		t.Fatal("hook was not called")
+	}
+	// Pull should have been aborted — local edit wins
+	if result.Pulled > 0 {
+		t.Errorf("pulled = %d, want 0 (local edit should block commit)", result.Pulled)
+	}
+	if result.Conflicts < 1 {
+		t.Errorf("conflicts = %d, want >= 1 (concurrent edit should be counted as conflict)", result.Conflicts)
+	}
+	if got := env.readLocal("file.txt"); got != "local-edit-during-pull" {
+		t.Errorf("local = %q, want 'local-edit-during-pull'", got)
+	}
 }
 
