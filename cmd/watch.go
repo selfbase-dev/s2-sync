@@ -159,6 +159,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s is not a directory", localDir)
 	}
 
+	// Create default .s2ignore if missing
+	if err := s2sync.EnsureIgnoreFile(localDir); err != nil {
+		return fmt.Errorf("failed to create .s2ignore: %w", err)
+	}
+
 	token, err := auth.LoadToken()
 	if err != nil {
 		return err

@@ -7,22 +7,25 @@ import (
 	"strings"
 )
 
-// Default exclude patterns (user can override via .s2ignore)
-var defaultExcludes = []string{
-	".git",
-	"node_modules",
-	".DS_Store",
-	"._*",
-	"Thumbs.db",
-	"desktop.ini",
-	"*.swp",
-	"*.swo",
-	"*~",
-}
+// defaultIgnoreContent is written to .s2ignore when it does not exist.
+// Users can edit this file to customize which files are excluded from sync.
+const defaultIgnoreContent = `# S2 ignore file — edit to customize sync exclusions.
+# Patterns use filepath.Match syntax (e.g. *.log, build/, docs/drafts).
+# Lines starting with # are comments.
 
-// Hard-coded excludes (always excluded, cannot be overridden)
-var hardExcludes = []string{
-	".s2",
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+`
+
+// defaultExcludes are always applied regardless of .s2ignore content.
+// These are macOS metadata files that should never be synced.
+var defaultExcludes = []string{
+	"._*",
+	"desktop.ini",
 }
 
 // isHardExcluded checks paths that are always excluded regardless of .s2ignore.
@@ -39,7 +42,16 @@ func isHardExcluded(rel string) bool {
 	return false
 }
 
-// DefaultExclude returns an exclude function using built-in patterns.
+// EnsureIgnoreFile creates a default .s2ignore in syncRoot if one does not exist.
+func EnsureIgnoreFile(syncRoot string) error {
+	ignorePath := filepath.Join(syncRoot, ".s2ignore")
+	if _, err := os.Stat(ignorePath); err == nil {
+		return nil // already exists
+	}
+	return os.WriteFile(ignorePath, []byte(defaultIgnoreContent), 0600)
+}
+
+// DefaultExclude returns an exclude function using built-in patterns only.
 func DefaultExclude() func(string) bool {
 	return matchesAny(defaultExcludes)
 }

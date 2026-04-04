@@ -54,20 +54,24 @@ func TestWalk_SkipsS2Dir(t *testing.T) {
 func TestWalk_ExcludeFunction(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
-	writeFile(t, filepath.Join(dir, ".DS_Store"), "mac")
-	writeFile(t, filepath.Join(dir, "._hidden"), "resource fork")
-	writeFile(t, filepath.Join(dir, ".git", "config"), "git")
+	writeFile(t, filepath.Join(dir, ".DS_Store"), "mac")       // not excluded by default anymore
+	writeFile(t, filepath.Join(dir, "._hidden"), "resource fork") // excluded: matches ._*
+	writeFile(t, filepath.Join(dir, ".git", "config"), "git")  // not excluded by default anymore
 
 	exclude := DefaultExclude()
 	files, err := Walk(dir, nil, exclude)
 	if err != nil {
 		t.Fatalf("Walk() error: %v", err)
 	}
-	if len(files) != 1 {
-		t.Errorf("got %d files, want 1 (only a.txt)", len(files))
+	// Only ._hidden is excluded by DefaultExclude; .DS_Store and .git are not
+	if _, ok := files["._hidden"]; ok {
+		t.Error("._hidden should be excluded (matches ._*)")
 	}
-	if _, ok := files["a.txt"]; !ok {
-		t.Error("missing a.txt")
+	if _, ok := files[".git/config"]; !ok {
+		t.Error(".git/config should be included (not excluded by default)")
+	}
+	if _, ok := files[".DS_Store"]; !ok {
+		t.Error(".DS_Store should be included (only excluded via .s2ignore)")
 	}
 }
 
