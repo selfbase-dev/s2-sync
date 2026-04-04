@@ -43,7 +43,7 @@ func TestLoadState_CorruptJSON(t *testing.T) {
 	}
 }
 
-func TestLoadState_V1Migration(t *testing.T) {
+func TestLoadState_OldVersionMigration(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, ".s2"), 0700)
 	v1 := map[string]any{"version": 1, "cursor": 42, "files": map[string]any{
@@ -67,8 +67,7 @@ func TestLoadState_V1Migration(t *testing.T) {
 func TestSaveState_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	state := &State{
-		RemotePrefix: "docs/",
-		Cursor:       "opaque_cursor",
+		Cursor: "opaque_cursor",
 		TokenID:      "tok_123",
 		PushedSeqs:   []int64{10, 20},
 		Files: map[string]types.FileState{

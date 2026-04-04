@@ -11,16 +11,15 @@ import (
 
 // State represents the .s2/state.json file.
 type State struct {
-	Version      int                        `json:"version"`
-	RemotePrefix string                     `json:"remote_prefix"`
-	SyncedAt     string                     `json:"synced_at"`
-	Cursor       string                     `json:"cursor,omitempty"`
-	TokenID      string                     `json:"token_id,omitempty"`
-	PushedSeqs   []int64                    `json:"pushed_seqs,omitempty"`
-	Files        map[string]types.FileState `json:"files"`
+	Version    int                        `json:"version"`
+	SyncedAt   string                     `json:"synced_at"`
+	Cursor     string                     `json:"cursor,omitempty"`
+	TokenID    string                     `json:"token_id,omitempty"`
+	PushedSeqs []int64                    `json:"pushed_seqs,omitempty"`
+	Files      map[string]types.FileState `json:"files"`
 }
 
-const currentStateVersion = 2
+const currentStateVersion = 3
 
 // StateDir returns the .s2 directory path within the sync root.
 func StateDir(syncRoot string) string {
@@ -51,8 +50,8 @@ func LoadState(syncRoot string) (*State, error) {
 		return newEmptyState(), nil
 	}
 
-	// v1 → v2 migration: cursor format changed (int64 → opaque string),
-	// ETag changed (hash → content_version). Reset state.
+	// v1/v2 → v3 migration: remote_prefix removed (token base_path is used instead).
+	// Reset state on any older version.
 	if state.Version < currentStateVersion {
 		return newEmptyState(), nil
 	}

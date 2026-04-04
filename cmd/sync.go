@@ -20,12 +20,13 @@ var (
 )
 
 var syncCmd = &cobra.Command{
-	Use:   "sync <local-dir> <remote-prefix>",
+	Use:   "sync <local-dir>",
 	Short: "Sync local directory with S2 remote",
-	Long: `Bidirectional sync between a local directory and an S2 remote prefix.
+	Long: `Bidirectional sync between a local directory and the S2 remote.
 
+The remote path is determined by the token's base_path.
 On conflict, local wins on first sync. Subsequent syncs use saved state to detect changes.`,
-	Args: cobra.ExactArgs(2),
+	Args: cobra.ExactArgs(1),
 	RunE: runSync,
 }
 
@@ -38,15 +39,6 @@ func init() {
 
 func runSync(cmd *cobra.Command, args []string) error {
 	localDir := args[0]
-	remotePrefix := args[1]
-
-	// Normalize remote prefix
-	if !strings.HasSuffix(remotePrefix, "/") {
-		remotePrefix += "/"
-	}
-	if strings.HasPrefix(remotePrefix, "/") {
-		remotePrefix = remotePrefix[1:]
-	}
 
 	// Validate local directory
 	info, err := os.Stat(localDir)
@@ -65,18 +57,18 @@ func runSync(cmd *cobra.Command, args []string) error {
 	endpoint := viper.GetString("endpoint")
 	c := client.New(endpoint, token)
 
-	// Get token ID for self-change filtering
+	// Get token ID for self-change filtering; derive remotePrefix from base_path
 	me, err := c.Me()
 	if err != nil {
 		return fmt.Errorf("failed to get auth context: %w", err)
 	}
+	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
 
 	// Load state
 	state, err := s2sync.LoadState(localDir)
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	state.RemotePrefix = remotePrefix
 	state.TokenID = me.TokenID
 
 	// Decide: initial sync or incremental
@@ -173,7 +165,7 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 		return runInitialSync(cmd, localDir, remotePrefix, c, state)
 	}
 
-	// Filter and normalize remote changes
+	// Filter remote changes (server already returns base_path-relative client paths)
 	var remoteChanges []types.ChangeEntry
 	for _, ch := range resp.Changes {
 		// Self-change filter: seq-based (primary) + token_id (defense-in-depth)
@@ -182,12 +174,6 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 		}
 		if ch.TokenID != "" && ch.TokenID == state.TokenID {
 			continue
-		}
-
-		// Strip remote prefix and skip changes outside our scope
-		ch = stripAndFilterPrefix(ch, remotePrefix)
-		if ch.Action == "" {
-			continue // outside our prefix
 		}
 		remoteChanges = append(remoteChanges, ch)
 	}
@@ -290,72 +276,3 @@ func executePlansAndReport(cmd *cobra.Command, plans []types.SyncPlan, localDir,
 	return result, nil
 }
 
-// stripAndFilterPrefix strips the remote prefix from change entry paths.
-// Returns an entry with Action="" if the change is outside our prefix scope.
-func stripAndFilterPrefix(ch types.ChangeEntry, prefix string) types.ChangeEntry {
-	normPrefix := "/" + prefix // changes use absolute paths like "/docs/file.txt"
-
-	strip := func(p string) (string, bool) {
-		if strings.HasPrefix(p, normPrefix) {
-			return strings.TrimPrefix(p, normPrefix), true
-		}
-		if strings.HasPrefix(p, prefix) {
-			return strings.TrimPrefix(p, prefix), true
-		}
-		return "", false
-	}
-
-	switch ch.Action {
-	case "put":
-		if ch.PathAfter != "" {
-			stripped, ok := strip(ch.PathAfter)
-			if !ok {
-				ch.Action = ""
-				return ch
-			}
-			ch.PathAfter = stripped
-		}
-	case "delete":
-		if ch.PathBefore != "" {
-			stripped, ok := strip(ch.PathBefore)
-			if !ok {
-				ch.Action = ""
-				return ch
-			}
-			ch.PathBefore = stripped
-		}
-	case "move":
-		beforeIn, afterIn := false, false
-		if ch.PathBefore != "" {
-			s, ok := strip(ch.PathBefore)
-			if ok {
-				ch.PathBefore = s
-				beforeIn = true
-			}
-		}
-		if ch.PathAfter != "" {
-			s, ok := strip(ch.PathAfter)
-			if ok {
-				ch.PathAfter = s
-				afterIn = true
-			}
-		}
-		switch {
-		case beforeIn && afterIn:
-			// both in scope: keep as move (compare decomposes to delete+pull)
-		case beforeIn && !afterIn:
-			// moved out of scope: treat as delete
-			ch.Action = "delete"
-			ch.PathAfter = ""
-		case !beforeIn && afterIn:
-			// moved into scope: treat as put
-			ch.Action = "put"
-			ch.PathBefore = ""
-		default:
-			// both out of scope
-			ch.Action = ""
-		}
-	}
-
-	return ch
-}
