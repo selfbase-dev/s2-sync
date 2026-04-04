@@ -93,6 +93,7 @@ type MeTokenResponse struct {
 	UserID      string       `json:"user_id"`
 	TokenID     string       `json:"token_id"`
 	CanDelegate bool         `json:"can_delegate"`
+	BasePath    string       `json:"base_path"` // token's virtual root (e.g. "/" or "/agents/")
 	AccessPaths []AccessPath `json:"access_paths"`
 }
 
