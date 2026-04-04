@@ -23,9 +23,7 @@ The sync root is determined by the token's `base_path`. To sync a different scop
 
 Token can also be set via `S2_TOKEN` env var.
 
-### Ignore patterns
-
-On first run, `s2 sync` / `s2 watch` creates a `.s2ignore` file in the local directory with default OS/editor patterns (`.DS_Store`, `Thumbs.db`, `*.swp`, etc.). Edit this file to customize what gets excluded.
+Add a `.s2ignore` file to exclude patterns from sync.
 
 ## Test
 
