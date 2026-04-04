@@ -22,10 +22,9 @@ var (
 var syncCmd = &cobra.Command{
 	Use:   "sync <local-dir> <remote-prefix>",
 	Short: "Sync local directory with S2 remote",
-	Long: `Bidirectional sync using archive-based three-way comparison.
-Local files are compared against remote files and the last-known state (.s2/state.json).
+	Long: `Bidirectional sync between a local directory and an S2 remote prefix.
 
-On first sync (no state.json), local wins on conflicts.`,
+On conflict, local wins on first sync. Subsequent syncs use saved state to detect changes.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runSync,
 }

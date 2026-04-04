@@ -39,7 +39,7 @@ S2_ENDPOINT=http://localhost:8888 \
 
 **E2E requirements:**
 - `S2_TOKEN`: root token with `can_delegate=true` and full read/write access
-- `S2_SCOPED_TOKEN` (optional): non-root `base_path` token. Enables scoped token tests (cross-token sync, `resync_required`, etc.)
+- `S2_SCOPED_TOKEN` (optional): scoped token with non-root `base_path`. Enables scoped token tests.
 
 ## Release
 

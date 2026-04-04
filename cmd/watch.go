@@ -27,12 +27,9 @@ var (
 var watchCmd = &cobra.Command{
 	Use:   "watch <local-dir> <remote-prefix>",
 	Short: "Watch and sync local directory with S2 remote",
-	Long: `Continuously watch for changes and sync bidirectionally.
+	Long: `Continuously sync between a local directory and an S2 remote prefix.
 
-Local changes are detected via fsnotify (OS-level file events).
-Remote changes are detected via change_log cursor polling.
-
-On cursor invalidation (410 Gone), falls back to full resync.`,
+Watches for local file changes and polls the remote for updates. Runs until interrupted (Ctrl-C).`,
 	Args: cobra.ExactArgs(2),
 	RunE: runWatch,
 }
