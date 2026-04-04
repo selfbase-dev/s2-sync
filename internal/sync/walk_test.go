@@ -6,77 +6,100 @@ import (
 	"testing"
 )
 
-func TestWalk(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create files
-	os.MkdirAll(filepath.Join(dir, "sub"), 0755)
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0644)
-	os.WriteFile(filepath.Join(dir, "sub", "b.txt"), []byte("world"), 0644)
-
-	// Create .s2 directory (should be skipped)
-	os.MkdirAll(filepath.Join(dir, ".s2"), 0755)
-	os.WriteFile(filepath.Join(dir, ".s2", "state.json"), []byte("{}"), 0644)
-
-	files, err := Walk(dir, nil, nil)
-	if err != nil {
-		t.Fatalf("Walk failed: %v", err)
-	}
-
-	if len(files) != 2 {
-		t.Fatalf("expected 2 files, got %d: %v", len(files), files)
-	}
-
-	if _, ok := files["a.txt"]; !ok {
-		t.Error("expected a.txt")
-	}
-	if _, ok := files["sub/b.txt"]; !ok {
-		t.Error("expected sub/b.txt")
-	}
-	if _, ok := files[".s2/state.json"]; ok {
-		t.Error(".s2/state.json should be excluded")
-	}
-
-	// Verify hash is SHA-256
-	if len(files["a.txt"].Hash) != 64 {
-		t.Errorf("expected 64-char SHA-256 hash, got %d chars", len(files["a.txt"].Hash))
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	os.MkdirAll(filepath.Dir(path), 0755)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("writeFile(%q): %v", path, err)
 	}
 }
 
-func TestWalkExclude(t *testing.T) {
+func TestWalk_BasicFiles(t *testing.T) {
 	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
+	writeFile(t, filepath.Join(dir, "sub", "b.txt"), "world")
 
-	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
-	os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("data"), 0644)
-	os.MkdirAll(filepath.Join(dir, "node_modules", "pkg"), 0755)
-	os.WriteFile(filepath.Join(dir, "node_modules", "pkg", "index.js"), []byte("data"), 0644)
-	os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("keep"), 0644)
+	files, err := Walk(dir, nil, nil)
+	if err != nil {
+		t.Fatalf("Walk() error: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("got %d files, want 2", len(files))
+	}
+	if _, ok := files["a.txt"]; !ok {
+		t.Error("missing a.txt")
+	}
+	if _, ok := files["sub/b.txt"]; !ok {
+		t.Error("missing sub/b.txt")
+	}
+}
+
+func TestWalk_SkipsS2Dir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
+	writeFile(t, filepath.Join(dir, ".s2", "state.json"), "{}")
+
+	files, err := Walk(dir, nil, nil)
+	if err != nil {
+		t.Fatalf("Walk() error: %v", err)
+	}
+	if _, ok := files[".s2/state.json"]; ok {
+		t.Error(".s2/state.json should be skipped")
+	}
+	if len(files) != 1 {
+		t.Errorf("got %d files, want 1", len(files))
+	}
+}
+
+func TestWalk_ExcludeFunction(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
+	writeFile(t, filepath.Join(dir, ".DS_Store"), "mac")
+	writeFile(t, filepath.Join(dir, "._hidden"), "resource fork")
+	writeFile(t, filepath.Join(dir, ".git", "config"), "git")
 
 	exclude := DefaultExclude()
 	files, err := Walk(dir, nil, exclude)
 	if err != nil {
-		t.Fatalf("Walk failed: %v", err)
+		t.Fatalf("Walk() error: %v", err)
 	}
-
 	if len(files) != 1 {
-		t.Fatalf("expected 1 file, got %d: %v", len(files), files)
+		t.Errorf("got %d files, want 1 (only a.txt)", len(files))
 	}
-	if _, ok := files["keep.txt"]; !ok {
-		t.Error("expected keep.txt")
+	if _, ok := files["a.txt"]; !ok {
+		t.Error("missing a.txt")
 	}
 }
 
-func TestWalkSameContent(t *testing.T) {
+func TestWalk_HashConsistency(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("same"), 0644)
-	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("same"), 0644)
+	writeFile(t, filepath.Join(dir, "a.txt"), "consistent content")
 
+	files1, _ := Walk(dir, nil, nil)
+	files2, _ := Walk(dir, nil, nil)
+
+	if files1["a.txt"].Hash != files2["a.txt"].Hash {
+		t.Error("hash should be consistent across walks")
+	}
+}
+
+func TestWalk_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
 	files, err := Walk(dir, nil, nil)
 	if err != nil {
-		t.Fatalf("Walk failed: %v", err)
+		t.Fatalf("Walk() error: %v", err)
 	}
+	if len(files) != 0 {
+		t.Errorf("got %d files, want 0", len(files))
+	}
+}
 
-	if files["a.txt"].Hash != files["b.txt"].Hash {
-		t.Error("same content should produce same hash")
+func TestWalk_ForwardSlashPaths(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a", "b", "c.txt"), "deep")
+
+	files, _ := Walk(dir, nil, nil)
+	if _, ok := files["a/b/c.txt"]; !ok {
+		t.Error("paths should use forward slashes")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,7 +32,7 @@ var watchCmd = &cobra.Command{
 Local changes are detected via fsnotify (OS-level file events).
 Remote changes are detected via change_log cursor polling.
 
-On cursor invalidation (410 Gone), falls back to full R2 list resync.`,
+On cursor invalidation (410 Gone), falls back to full resync.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runWatch,
 }
@@ -57,7 +58,7 @@ func shouldProcessEvent(rel string, exclude func(string) bool) bool {
 // WatchLoopConfig holds injectable dependencies for the watch loop.
 type WatchLoopConfig struct {
 	SyncFn       func() error
-	PollFn       func() (hasChanges, cursorInvalid bool, err error)
+	PollFn       func() (hasChanges, needResync bool, err error)
 	LocalEvents  <-chan struct{}
 	PollInterval time.Duration
 	Debounce     time.Duration
@@ -65,7 +66,6 @@ type WatchLoopConfig struct {
 }
 
 // watchLoop is the testable core of the watch command.
-// It listens for local and remote changes, debounces, and triggers sync.
 func watchLoop(cfg WatchLoopConfig) {
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
@@ -89,11 +89,11 @@ func watchLoop(cfg WatchLoopConfig) {
 			})
 
 		case <-ticker.C:
-			hasChanges, cursorInvalid, err := cfg.PollFn()
+			hasChanges, needResync, err := cfg.PollFn()
 			if err != nil {
 				continue
 			}
-			if hasChanges || cursorInvalid {
+			if hasChanges || needResync {
 				if debounceTimer != nil {
 					debounceTimer.Stop()
 				}
@@ -170,9 +170,18 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	endpoint := viper.GetString("endpoint")
 	c := client.New(endpoint, token)
 
+	// Get token ID
+	me, err := c.Me()
+	if err != nil {
+		return fmt.Errorf("failed to get auth context: %w", err)
+	}
+
+	// Mutex for sync serialization
+	var syncMu sync.Mutex
+
 	// Initial full sync
 	fmt.Fprintln(cmd.OutOrStdout(), "Running initial sync...")
-	if err := doSync(cmd, localDir, remotePrefix, c); err != nil {
+	if err := doSync(cmd, localDir, remotePrefix, c, me.TokenID, &syncMu); err != nil {
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
@@ -207,22 +216,40 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return false, false, err
 		}
-		changes, err := c.PollChanges(state.Cursor, 1)
-		if err == client.ErrCursorInvalid {
+		if state.Cursor == "" {
+			return false, true, nil // need full sync
+		}
+		resp, err := c.PollChanges(state.Cursor)
+		if err == client.ErrCursorGone {
 			return false, true, nil
 		}
 		if err != nil {
 			return false, false, err
 		}
-		return len(changes) > 0, false, nil
+		if resp.ResyncRequired {
+			return false, true, nil
+		}
+		// Filter self-changes (same logic as sync.go)
+		hasRemoteChanges := false
+		for _, ch := range resp.Changes {
+			if state.IsPushedSeq(ch.Seq) {
+				continue
+			}
+			if ch.TokenID != "" && ch.TokenID == state.TokenID {
+				continue
+			}
+			hasRemoteChanges = true
+			break
+		}
+		return hasRemoteChanges, false, nil
 	}
 
 	// Build sync function
 	syncFn := func() error {
-		return doSync(cmd, localDir, remotePrefix, c)
+		return doSync(cmd, localDir, remotePrefix, c, me.TokenID, &syncMu)
 	}
 
-	// Run watch loop in goroutine, listen for signal in main
+	// Run watch loop
 	go watchLoop(WatchLoopConfig{
 		SyncFn:       syncFn,
 		PollFn:       pollFn,
@@ -239,113 +266,154 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// doSync performs a full sync cycle (same logic as sync command).
-func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client) error {
+// doSync performs a full sync cycle with mutex for serialization.
+func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, tokenID string, mu *sync.Mutex) error {
+	mu.Lock()
+	defer mu.Unlock()
+
 	state, err := s2sync.LoadState(localDir)
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	state.RemotePrefix = remotePrefix
+	state.TokenID = tokenID
+
+	if state.Cursor == "" {
+		return runInitialSyncInner(cmd, localDir, remotePrefix, c, state)
+	}
+	return runIncrementalSyncInner(cmd, localDir, remotePrefix, c, state)
+}
+
+func runInitialSyncInner(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State) error {
+	// Clear archive for fresh comparison (see sync.go runInitialSync comment)
+	state.Files = make(map[string]types.FileState)
 
 	exclude := s2sync.LoadExclude(localDir)
-
-	// Walk local
 	localFiles, err := s2sync.Walk(localDir, state.Files, exclude)
 	if err != nil {
 		return fmt.Errorf("local scan failed: %w", err)
 	}
 
-	// Determine remote files
-	remoteFiles, newCursor, err := getRemoteState(c, remotePrefix, state)
+	remoteFiles, err := c.ListAllRecursive(remotePrefix)
 	if err != nil {
-		return fmt.Errorf("remote state failed: %w", err)
+		return fmt.Errorf("remote list failed: %w", err)
 	}
 
-	// Three-way compare
 	plans := s2sync.Compare(localFiles, remoteFiles, state.Files)
 
-	if len(plans) == 0 {
-		// Update cursor even if nothing to sync
-		if newCursor > state.Cursor {
-			state.Cursor = newCursor
-			_ = s2sync.SaveState(localDir, state)
+	var hasErrors bool
+	if len(plans) > 0 {
+		ts := time.Now().Format("15:04:05")
+		counts := make(map[types.SyncAction]int)
+		for _, p := range plans {
+			counts[p.Action]++
 		}
-		return nil
-	}
+		fmt.Fprintf(cmd.OutOrStdout(), "[%s] sync: %d push, %d pull, %d delete, %d conflict\n",
+			ts, counts[types.Push], counts[types.Pull],
+			counts[types.DeleteLocal]+counts[types.DeleteRemote], counts[types.Conflict])
 
-	// Print summary
-	counts := make(map[types.SyncAction]int)
-	for _, p := range plans {
-		counts[p.Action]++
-	}
-	ts := time.Now().Format("15:04:05")
-	fmt.Fprintf(cmd.OutOrStdout(), "[%s] sync: %d push, %d pull, %d delete, %d conflict\n",
-		ts, counts[types.Push], counts[types.Pull],
-		counts[types.DeleteLocal]+counts[types.DeleteRemote], counts[types.Conflict])
-
-	// Execute
-	result, err := s2sync.Execute(plans, localDir, remotePrefix, c, state, false)
-	if err != nil {
-		return err
-	}
-
-	// Update cursor
-	if newCursor > state.Cursor {
-		state.Cursor = newCursor
-	}
-
-	// Save state
-	if err := s2sync.SaveState(localDir, state); err != nil {
-		return fmt.Errorf("failed to save state: %w", err)
-	}
-
-	if len(result.Errors) > 0 {
-		for _, e := range result.Errors {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  error: %v\n", e)
+		result, err := s2sync.Execute(plans, localDir, remotePrefix, c, state, false)
+		if err != nil {
+			return err
+		}
+		if len(result.Errors) > 0 {
+			hasErrors = true
+			for _, e := range result.Errors {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  error: %v\n", e)
+			}
 		}
 	}
 
-	return nil
+	// Only advance cursor if no errors
+	if !hasErrors {
+		cursor, err := c.LatestCursor()
+		if err == nil {
+			state.Cursor = cursor
+		}
+	}
+
+	return s2sync.SaveState(localDir, state)
 }
 
-// getRemoteState builds the remote file map. Uses R2 list (full scan) since
-// change_log only tells us what changed but not the current ETag.
-// However, we use the cursor to know where we are for next poll.
-func getRemoteState(c *client.Client, remotePrefix string, state *s2sync.State) (map[string]types.RemoteFile, int64, error) {
-	// Get latest cursor before listing (Dropbox pattern: ADR 0009 §同期中の安全性)
-	latestCursor, err := c.LatestCursor()
+func runIncrementalSyncInner(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State) error {
+	exclude := s2sync.LoadExclude(localDir)
+	localFiles, err := s2sync.Walk(localDir, state.Files, exclude)
 	if err != nil {
-		// Non-fatal: proceed without cursor update
-		latestCursor = state.Cursor
+		return fmt.Errorf("local scan failed: %w", err)
 	}
 
-	// R2 list for full remote state
-	remoteObjects, err := c.ListAll(remotePrefix)
+	resp, err := c.PollChanges(state.Cursor)
+	if err == client.ErrCursorGone {
+		state.Cursor = ""
+		return runInitialSyncInner(cmd, localDir, remotePrefix, c, state)
+	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("remote list failed: %w", err)
+		return fmt.Errorf("poll changes failed: %w", err)
+	}
+	if resp.ResyncRequired {
+		state.Cursor = ""
+		return runInitialSyncInner(cmd, localDir, remotePrefix, c, state)
 	}
 
-	remoteFiles := make(map[string]types.RemoteFile)
-	for _, obj := range remoteObjects {
-		relPath := strings.TrimPrefix(obj.Key, remotePrefix)
-		if relPath == "" {
+	// Filter and normalize remote changes (same logic as sync.go)
+	var remoteChanges []types.ChangeEntry
+	for _, ch := range resp.Changes {
+		if state.IsPushedSeq(ch.Seq) {
 			continue
 		}
-		remoteFiles[relPath] = types.RemoteFile{
-			ETag:         obj.ETag,
-			Size:         obj.Size,
-			LastModified: obj.LastModified,
+		if ch.TokenID != "" && ch.TokenID == state.TokenID {
+			continue
+		}
+		ch = stripAndFilterPrefix(ch, remotePrefix)
+		if ch.Action == "" {
+			continue
+		}
+		remoteChanges = append(remoteChanges, ch)
+	}
+
+	plans := s2sync.CompareIncremental(localFiles, state.Files, remoteChanges)
+
+	var hasErrors bool
+	if len(plans) > 0 {
+		ts := time.Now().Format("15:04:05")
+		counts := make(map[types.SyncAction]int)
+		for _, p := range plans {
+			counts[p.Action]++
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "[%s] sync: %d push, %d pull, %d delete, %d conflict\n",
+			ts, counts[types.Push], counts[types.Pull],
+			counts[types.DeleteLocal]+counts[types.DeleteRemote], counts[types.Conflict])
+
+		result, err := s2sync.Execute(plans, localDir, remotePrefix, c, state, false)
+		if err != nil {
+			return err
+		}
+		if len(result.Errors) > 0 {
+			hasErrors = true
+			for _, e := range result.Errors {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  error: %v\n", e)
+			}
 		}
 	}
 
-	return remoteFiles, latestCursor, nil
+	// Only advance cursor if no errors — failed changes need to be retried
+	if !hasErrors {
+		if resp.NextCursor != "" {
+			state.Cursor = resp.NextCursor
+		}
+		if len(resp.Changes) > 0 {
+			state.PrunePushedSeqs(resp.Changes[0].Seq)
+		}
+	}
+
+	return s2sync.SaveState(localDir, state)
 }
 
 // addWatchDirs recursively adds directories to the fsnotify watcher.
 func addWatchDirs(watcher *fsnotify.Watcher, root string, exclude func(string) bool) error {
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // skip errors
+			return nil
 		}
 		if !info.IsDir() {
 			return nil
@@ -357,12 +425,9 @@ func addWatchDirs(watcher *fsnotify.Watcher, root string, exclude func(string) b
 		}
 		rel = filepath.ToSlash(rel)
 
-		// Skip .s2/
 		if rel == ".s2" || strings.HasPrefix(rel, ".s2/") {
 			return filepath.SkipDir
 		}
-
-		// Skip excluded directories
 		if rel != "." && exclude != nil && exclude(rel) {
 			return filepath.SkipDir
 		}

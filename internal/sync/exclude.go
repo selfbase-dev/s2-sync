@@ -7,15 +7,36 @@ import (
 	"strings"
 )
 
-// Default exclude patterns
+// Default exclude patterns (user can override via .s2ignore)
 var defaultExcludes = []string{
 	".git",
 	"node_modules",
 	".DS_Store",
+	"._*",
 	"Thumbs.db",
+	"desktop.ini",
 	"*.swp",
 	"*.swo",
 	"*~",
+}
+
+// Hard-coded excludes (always excluded, cannot be overridden)
+var hardExcludes = []string{
+	".s2",
+}
+
+// isHardExcluded checks paths that are always excluded regardless of .s2ignore.
+func isHardExcluded(rel string) bool {
+	base := filepath.Base(rel)
+	// .s2 directory
+	if base == ".s2" || rel == ".s2" || strings.HasPrefix(rel, ".s2/") {
+		return true
+	}
+	// .sync-conflict-* files
+	if strings.Contains(base, ".sync-conflict-") {
+		return true
+	}
+	return false
 }
 
 // DefaultExclude returns an exclude function using built-in patterns.
@@ -42,11 +63,20 @@ func LoadExclude(syncRoot string) func(string) bool {
 		}
 	}
 
-	return matchesAny(patterns)
+	matcher := matchesAny(patterns)
+	return func(path string) bool {
+		if isHardExcluded(path) {
+			return true
+		}
+		return matcher(path)
+	}
 }
 
 func matchesAny(patterns []string) func(string) bool {
 	return func(path string) bool {
+		if isHardExcluded(path) {
+			return true
+		}
 		base := filepath.Base(path)
 		for _, p := range patterns {
 			// Match against basename

@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,9 @@ import (
 	"github.com/selfbase-dev/s2-cli/internal/types"
 )
 
+// ChunkedUploadThreshold is the file size above which chunked upload is used.
+const ChunkedUploadThreshold = 10 * 1024 * 1024 // 10 MB
+
 // ExecuteResult tracks the outcome of sync execution.
 type ExecuteResult struct {
 	Pushed    int
@@ -22,8 +26,6 @@ type ExecuteResult struct {
 }
 
 // Execute applies the sync plans against local filesystem and remote storage.
-// For conflict actions, local wins: local stays as-is, remote is saved as
-// .sync-conflict-YYYYMMDD-HHMMSS file.
 func Execute(
 	plans []types.SyncPlan,
 	localRoot string,
@@ -85,9 +87,13 @@ func Execute(
 				result.Deleted++
 				continue
 			}
-			if err := c.DeleteObject(remoteKey); err != nil {
+			delResult, err := c.Delete(remoteKey)
+			if err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("delete remote %s: %w", plan.Path, err))
 				continue
+			}
+			if delResult != nil && delResult.Seq != nil {
+				state.AddPushedSeq(*delResult.Seq)
 			}
 			delete(state.Files, plan.Path)
 			result.Deleted++
@@ -104,6 +110,7 @@ func Execute(
 				continue
 			}
 			result.Conflicts++
+
 		}
 	}
 
@@ -111,44 +118,124 @@ func Execute(
 }
 
 func executePush(localPath, remoteKey, relPath string, c *client.Client, state *State) error {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return err
+	}
+
+	// Use chunked upload for large files
+	if info.Size() > ChunkedUploadThreshold {
+		return executePushChunked(localPath, remoteKey, relPath, info.Size(), c, state)
+	}
+
 	f, err := os.Open(localPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	// Use If-Match for optimistic locking if we have a previous ETag
-	var ifMatch string
-	if prev, ok := state.Files[relPath]; ok && prev.RemoteETag != "" {
-		ifMatch = prev.RemoteETag
+	// Determine conditional header
+	var ifMatchVersion int64
+	if prev, ok := state.Files[relPath]; ok && prev.ContentVersion > 0 {
+		ifMatchVersion = prev.ContentVersion // If-Match for update
+	} else {
+		ifMatchVersion = 0 // If-None-Match: * for create
 	}
 
-	newETag, err := c.PutObject(remoteKey, f, ifMatch)
-	if err == client.ErrPreconditionFailed {
-		// Remote was modified since last sync — treat as conflict
-		fmt.Printf("conflict (push rejected): %s\n", relPath)
-		return nil
+	result, err := c.Upload(remoteKey, f, "", ifMatchVersion)
+	if err == client.ErrPreconditionFailed || err == client.ErrConflict {
+		return fmt.Errorf("conflict (push rejected, remote was modified): %s", relPath)
 	}
 	if err != nil {
 		return err
 	}
 
-	// Compute local hash for state
+	// Record seq for self-change filtering (ADR 0033)
+	if result.Seq != nil {
+		state.AddPushedSeq(*result.Seq)
+	}
+
+	// Parse content_version from etag
+	cv, _ := client.ParseContentVersion(result.ETag)
+
 	hash, err := hashFile(localPath)
 	if err != nil {
 		return err
 	}
 
-	info, err := os.Stat(localPath)
+	state.Files[relPath] = types.FileState{
+		LocalHash:      hash,
+		ContentVersion: cv,
+		Size:           info.Size(),
+		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	return nil
+}
+
+func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c *client.Client, state *State) error {
+	// NOTE: Chunked upload does not support If-Match CAS (the server's upload
+	// session has base_content_version internally, but it's not exposed in the
+	// public API yet). This means concurrent edits to large files won't be
+	// detected as conflicts. See ADR 0033 for the planned API change.
+
+	// Create upload session
+	session, err := c.CreateUploadSession(remoteKey, totalSize, 0)
+	if err != nil {
+		return fmt.Errorf("create upload session: %w", err)
+	}
+
+	f, err := os.Open(localPath)
+	if err != nil {
+		_ = c.CancelUpload(session.SessionID)
+		return err
+	}
+	defer f.Close()
+
+	chunkSize := session.ChunkSize
+	buf := make([]byte, chunkSize)
+	chunkIndex := 0
+	totalChunks := int((totalSize + int64(chunkSize) - 1) / int64(chunkSize))
+
+	for {
+		n, readErr := io.ReadFull(f, buf)
+		if n > 0 {
+			if err := c.UploadChunk(session.SessionID, chunkIndex, bytes.NewReader(buf[:n])); err != nil {
+				_ = c.CancelUpload(session.SessionID)
+				return fmt.Errorf("upload chunk %d: %w", chunkIndex, err)
+			}
+			fmt.Printf("  chunk %d/%d uploaded\n", chunkIndex+1, totalChunks)
+			chunkIndex++
+		}
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			break
+		}
+		if readErr != nil {
+			_ = c.CancelUpload(session.SessionID)
+			return fmt.Errorf("read file: %w", readErr)
+		}
+	}
+
+	result, err := c.CompleteUpload(session.SessionID)
+	if err != nil {
+		return fmt.Errorf("complete upload: %w", err)
+	}
+
+	// Record seq for self-change filtering (ADR 0033)
+	if result.Seq != nil {
+		state.AddPushedSeq(*result.Seq)
+	}
+
+	cv, _ := client.ParseContentVersion(result.ETag)
+	hash, err := hashFile(localPath)
 	if err != nil {
 		return err
 	}
 
 	state.Files[relPath] = types.FileState{
-		LocalHash:  hash,
-		RemoteETag: newETag,
-		Size:       info.Size(),
-		SyncedAt:   time.Now().UTC().Format(time.RFC3339),
+		LocalHash:      hash,
+		ContentVersion: cv,
+		Size:           totalSize,
+		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
 	return nil
 }
@@ -163,11 +250,11 @@ func executePull(localPath, remoteKey, relPath string, c *client.Client, state *
 		}
 	}
 
-	body, etag, err := c.GetObject(remoteKey)
+	dl, err := c.Download(remoteKey)
 	if err != nil {
 		return err
 	}
-	defer body.Close()
+	defer dl.Body.Close()
 
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
@@ -181,7 +268,7 @@ func executePull(localPath, remoteKey, relPath string, c *client.Client, state *
 		return err
 	}
 
-	if _, err := io.Copy(f, body); err != nil {
+	if _, err := io.Copy(f, dl.Body); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
 		return err
@@ -204,43 +291,81 @@ func executePull(localPath, remoteKey, relPath string, c *client.Client, state *
 	}
 
 	state.Files[relPath] = types.FileState{
-		LocalHash:  hash,
-		RemoteETag: etag,
-		Size:       info.Size(),
-		SyncedAt:   time.Now().UTC().Format(time.RFC3339),
+		LocalHash:      hash,
+		ContentVersion: dl.ContentVersion,
+		Size:           info.Size(),
+		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
 	return nil
 }
 
 // executeConflict handles conflict by keeping local and saving remote as
 // .sync-conflict-YYYYMMDD-HHMMSS file (Syncthing style, extension preserved).
+//
+// Special case: on initial sync (no archive), both sides exist but we don't
+// know if they're identical. We download remote, compare hashes, and if
+// identical treat as no-op (just record state).
 func executeConflict(localPath, remoteKey, relPath, localRoot string, c *client.Client, state *State) error {
 	// Download remote version
-	body, remoteETag, err := c.GetObject(remoteKey)
+	dl, err := c.Download(remoteKey)
 	if err != nil {
 		// Remote might be deleted in delete-vs-change conflict
-		// In that case, just push local
 		fmt.Printf("conflict (remote unavailable, pushing local): %s\n", relPath)
 		return nil
 	}
-	defer body.Close()
 
-	// Build conflict file name: file.sync-conflict-YYYYMMDD-HHMMSS.ext
-	conflictPath := conflictFileName(localPath)
-
-	if err := os.MkdirAll(filepath.Dir(conflictPath), 0755); err != nil {
+	// Write remote content to temp file so we can hash it
+	tmpPath := localPath + ".s2conflict"
+	if err := os.MkdirAll(filepath.Dir(tmpPath), 0755); err != nil {
+		dl.Body.Close()
 		return err
 	}
-
-	f, err := os.Create(conflictPath)
+	tmpF, err := os.Create(tmpPath)
 	if err != nil {
+		dl.Body.Close()
 		return err
 	}
-	if _, err := io.Copy(f, body); err != nil {
-		f.Close()
+	if _, err := io.Copy(tmpF, dl.Body); err != nil {
+		tmpF.Close()
+		dl.Body.Close()
+		os.Remove(tmpPath)
 		return err
 	}
-	f.Close()
+	tmpF.Close()
+	dl.Body.Close()
+
+	// Compare hashes: if identical, this isn't a real conflict
+	localHash, err := hashFile(localPath)
+	if err != nil {
+		// Local might not exist (delete-vs-change conflict)
+		localHash = ""
+	}
+	remoteHash, _ := hashFile(tmpPath)
+
+	if localHash != "" && localHash == remoteHash {
+		// Identical content — not a real conflict, just record state
+		os.Remove(tmpPath)
+		info, _ := os.Stat(localPath)
+		size := int64(0)
+		if info != nil {
+			size = info.Size()
+		}
+		state.Files[relPath] = types.FileState{
+			LocalHash:      localHash,
+			ContentVersion: dl.ContentVersion,
+			Size:           size,
+			SyncedAt:       time.Now().UTC().Format(time.RFC3339),
+		}
+		fmt.Printf("verified: %s (identical)\n", relPath)
+		return nil
+	}
+
+	// Real conflict: save remote as .sync-conflict-* file
+	conflictPath := conflictFileName(localPath)
+	if err := os.Rename(tmpPath, conflictPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
 
 	conflictRel, _ := filepath.Rel(localRoot, conflictPath)
 	conflictRel = filepath.ToSlash(conflictRel)
@@ -250,48 +375,38 @@ func executeConflict(localPath, remoteKey, relPath, localRoot string, c *client.
 	lf, err := os.Open(localPath)
 	if err != nil {
 		// Local might be deleted in delete-vs-change conflict
-		// Remote version is already saved as conflict file
 		fmt.Printf("conflict (local deleted, remote saved): %s\n", relPath)
 		return nil
 	}
 	defer lf.Close()
 
-	newETag, err := c.PutObject(remoteKey, lf, "")
+	result, err := c.Upload(remoteKey, lf, "", -1) // force overwrite
 	if err != nil {
 		return err
 	}
 
-	// Update state
-	hash, err := hashFile(localPath)
-	if err != nil {
-		return err
+	// Record seq for self-change filtering (ADR 0033)
+	if result.Seq != nil {
+		state.AddPushedSeq(*result.Seq)
 	}
+
+	cv, _ := client.ParseContentVersion(result.ETag)
+
 	info, err := os.Stat(localPath)
 	if err != nil {
 		return err
 	}
 
 	state.Files[relPath] = types.FileState{
-		LocalHash:  hash,
-		RemoteETag: newETag,
-		Size:       info.Size(),
-		SyncedAt:   time.Now().UTC().Format(time.RFC3339),
-	}
-
-	// Also track the conflict file in state
-	conflictHash, _ := hashFile(conflictPath)
-	conflictInfo, _ := os.Stat(conflictPath)
-	if conflictInfo != nil {
-		state.Files[conflictRel] = types.FileState{
-			LocalHash:  conflictHash,
-			RemoteETag: remoteETag,
-			Size:       conflictInfo.Size(),
-			SyncedAt:   time.Now().UTC().Format(time.RFC3339),
-		}
+		LocalHash:      localHash,
+		ContentVersion: cv,
+		Size:           info.Size(),
+		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
 
 	return nil
 }
+
 
 // conflictFileName generates a Syncthing-style conflict name with extension preserved.
 // "report.txt" → "report.sync-conflict-20260322-100000.txt"

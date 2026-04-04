@@ -37,10 +37,11 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid token: must start with s2_")
 	}
 
-	// Validate token by making a test API call
+	// Validate token by calling /api/me
 	endpoint := viper.GetString("endpoint")
 	c := client.New(endpoint, token)
-	if err := c.Validate(); err != nil {
+	me, err := c.Me()
+	if err != nil {
 		return fmt.Errorf("token validation failed: %w", err)
 	}
 
@@ -58,7 +59,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), "Login successful!")
+	fmt.Fprintf(cmd.OutOrStdout(), "Login successful! (token: %s, user: %s)\n", me.TokenID, me.UserID)
 	return nil
 }
 

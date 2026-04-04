@@ -21,6 +21,18 @@ s2 watch ./local-dir my-prefix/
 
 Token can also be set via `S2_TOKEN` env var.
 
+## Test
+
+```sh
+# Unit tests
+go test ./...
+
+# E2E tests (requires running S2 server)
+S2_ENDPOINT=http://localhost:8888 S2_TOKEN=s2_xxx go test -tags e2e ./internal/sync/
+```
+
+E2E requires a token with `can_delegate=true` and full read/write access.
+
 ## Release
 
 ```sh

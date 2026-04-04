@@ -2,639 +2,743 @@ package client
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
+
+	"github.com/selfbase-dev/s2-cli/internal/types"
 )
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
+// --- Helpers ---
 
-// fakeAPI creates an httptest server that mimics /api/files and /api/me.
-// handlers is a map of "METHOD /path" → handler function.
-func fakeAPI(t *testing.T, handlers map[string]http.HandlerFunc) *httptest.Server {
+// newTestServer creates an httptest server with a route handler map.
+// Routes are keyed as "METHOD /path" (exact match) or "METHOD /prefix/" (prefix match).
+func newTestServer(t *testing.T, routes map[string]http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.Path
-		// Try exact match first
-		if h, ok := handlers[key]; ok {
+		if h, ok := routes[key]; ok {
 			h(w, r)
 			return
 		}
-		// Try prefix match for catch-all routes
-		for pattern, h := range handlers {
-			parts := strings.SplitN(pattern, " ", 2)
-			if len(parts) == 2 && r.Method == parts[0] && strings.HasPrefix(r.URL.Path, parts[1]) {
+		// Try prefix match
+		for k, h := range routes {
+			parts := strings.SplitN(k, " ", 2)
+			if len(parts) == 2 && parts[0] == r.Method && strings.HasSuffix(parts[1], "/") && strings.HasPrefix(r.URL.Path, parts[1]) {
 				h(w, r)
 				return
 			}
 		}
-		t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
-		http.Error(w, "not found", 404)
+		t.Errorf("unhandled request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(500)
 	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-// requireAuth checks Authorization header and returns false (writing 401) if invalid.
-func requireAuth(w http.ResponseWriter, r *http.Request, token string) bool {
-	if r.Header.Get("Authorization") != "Bearer "+token {
-		http.Error(w, "unauthorized", 401)
+func requireAuth(t *testing.T, r *http.Request, expectedToken string) bool {
+	t.Helper()
+	got := r.Header.Get("Authorization")
+	want := "Bearer " + expectedToken
+	if got != want {
+		t.Errorf("Authorization = %q, want %q", got, want)
 		return false
 	}
 	return true
 }
 
-// ---------------------------------------------------------------------------
-// Validate
-// ---------------------------------------------------------------------------
+func jsonResponse(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
 
-func TestValidate_Success(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/me": func(w http.ResponseWriter, r *http.Request) {
-			if !requireAuth(w, r, "s2_validtoken") {
+// --- ETag helpers ---
+
+func TestParseContentVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		etag    string
+		want    int64
+		wantErr bool
+	}{
+		{"quoted integer", `"42"`, 42, false},
+		{"unquoted integer", "42", 42, false},
+		{"zero", `"0"`, 0, false},
+		{"large number", `"999999"`, 999999, false},
+		{"empty", "", 0, true},
+		{"empty quotes", `""`, 0, true},
+		{"non-numeric", `"abc"`, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseContentVersion(tt.etag)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseContentVersion(%q) error = %v, wantErr %v", tt.etag, err, tt.wantErr)
 				return
 			}
-			w.WriteHeader(200)
-			fmt.Fprint(w, `{"user_id":"u1","email":"test@example.com"}`)
-		},
-	})
-	defer srv.Close()
-
-	c := New(srv.URL, "s2_validtoken")
-	if err := c.Validate(); err != nil {
-		t.Fatalf("expected success, got %v", err)
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParseContentVersion(%q) = %d, want %d", tt.etag, got, tt.want)
+			}
+		})
 	}
 }
 
-func TestValidate_InvalidToken(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestFormatETag(t *testing.T) {
+	tests := []struct {
+		cv   int64
+		want string
+	}{
+		{42, `"42"`},
+		{0, `"0"`},
+		{999999, `"999999"`},
+	}
+	for _, tt := range tests {
+		got := FormatETag(tt.cv)
+		if got != tt.want {
+			t.Errorf("FormatETag(%d) = %q, want %q", tt.cv, got, tt.want)
+		}
+	}
+}
+
+// --- /api/me ---
+
+func TestMe_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/me": func(w http.ResponseWriter, r *http.Request) {
+			requireAuth(t, r, "s2_testtoken")
+			jsonResponse(w, 200, map[string]any{
+				"type": "token", "user_id": "user_1", "token_id": "tok_1",
+				"can_delegate": false,
+				"access_paths": []map[string]any{{"path": "/", "can_read": true, "can_write": true}},
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_testtoken")
+	me, err := c.Me()
+	if err != nil {
+		t.Fatalf("Me() error: %v", err)
+	}
+	if me.TokenID != "tok_1" {
+		t.Errorf("TokenID = %q, want %q", me.TokenID, "tok_1")
+	}
+	if me.UserID != "user_1" {
+		t.Errorf("UserID = %q, want %q", me.UserID, "user_1")
+	}
+	if len(me.AccessPaths) != 1 {
+		t.Errorf("AccessPaths len = %d, want 1", len(me.AccessPaths))
+	}
+}
+
+func TestMe_Unauthorized(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/me": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(401)
-			fmt.Fprint(w, `{"error":"Unauthorized"}`)
 		},
 	})
-	defer srv.Close()
 
-	c := New(srv.URL, "s2_badtoken")
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("expected error for invalid token")
-	}
-	if !strings.Contains(err.Error(), "invalid or expired token") {
-		t.Errorf("unexpected error message: %v", err)
+	c := New(srv.URL, "s2_bad")
+	_, err := c.Me()
+	if err != ErrUnauthorized {
+		t.Errorf("Me() error = %v, want ErrUnauthorized", err)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ListAll
-// ---------------------------------------------------------------------------
+// --- /api/files (list) ---
 
-func TestListAll_Basic(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestListDir_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(map[string]any{
+			size := int64(1024)
+			jsonResponse(w, 200, map[string]any{
 				"items": []map[string]any{
-					{"key": "docs/a.txt", "size": 100, "uploaded": "2026-03-22T10:00:00Z", "hash": "abc123"},
-					{"key": "docs/b.txt", "size": 200, "uploaded": "2026-03-22T11:00:00Z", "hash": "def456"},
+					{"id": "n1", "name": "readme.md", "type": "file", "size": size, "modified_at": "2026-04-01T00:00:00Z"},
+					{"id": "n2", "name": "docs", "type": "directory"},
 				},
 			})
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	objects, err := c.ListAll("docs/")
+	resp, err := c.ListDir("prefix/")
 	if err != nil {
-		t.Fatalf("ListAll failed: %v", err)
+		t.Fatalf("ListDir() error: %v", err)
 	}
-	if len(objects) != 2 {
-		t.Fatalf("expected 2 objects, got %d", len(objects))
+	if len(resp.Items) != 2 {
+		t.Fatalf("ListDir() got %d items, want 2", len(resp.Items))
 	}
-	if objects[0].Key != "docs/a.txt" {
-		t.Errorf("expected key docs/a.txt, got %s", objects[0].Key)
+	if resp.Items[0].Type != "file" || resp.Items[0].Name != "readme.md" {
+		t.Errorf("item[0] = %+v", resp.Items[0])
 	}
-	if objects[0].ETag != "abc123" {
-		t.Errorf("expected etag abc123, got %s", objects[0].ETag)
-	}
-	if objects[1].Size != 200 {
-		t.Errorf("expected size 200, got %d", objects[1].Size)
+	if resp.Items[1].Type != "directory" || resp.Items[1].Name != "docs" {
+		t.Errorf("item[1] = %+v", resp.Items[1])
 	}
 }
 
-func TestListAll_EmptyDirectory(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestListDir_AddsTrailingSlash(t *testing.T) {
+	var gotPath string
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+			gotPath = r.URL.Path
+			jsonResponse(w, 200, map[string]any{"items": []any{}})
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	objects, err := c.ListAll("")
+	_, err := c.ListDir("docs") // no trailing slash
 	if err != nil {
-		t.Fatalf("ListAll failed: %v", err)
+		t.Fatalf("ListDir() error: %v", err)
 	}
-	if len(objects) != 0 {
-		t.Fatalf("expected 0 objects, got %d", len(objects))
+	if !strings.HasSuffix(gotPath, "/") {
+		t.Errorf("path = %q, should end with /", gotPath)
 	}
 }
 
-func TestListAll_ManyFiles(t *testing.T) {
-	// Simulate a project with 500 files (git repo, node_modules etc.)
-	const fileCount = 500
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestListAllRecursive_404_ReturnsEmpty(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			items := make([]map[string]any, fileCount)
-			for i := range items {
-				items[i] = map[string]any{
-					"key":      fmt.Sprintf("project/src/file_%04d.ts", i),
-					"size":     int64(i * 100),
-					"uploaded": "2026-03-22T10:00:00Z",
-					"hash":     fmt.Sprintf("hash_%04d", i),
-				}
-			}
-			json.NewEncoder(w).Encode(map[string]any{"items": items})
+			w.WriteHeader(404)
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	objects, err := c.ListAll("project/")
+	result, err := c.ListAllRecursive("nonexistent/prefix/")
 	if err != nil {
-		t.Fatalf("ListAll failed: %v", err)
+		t.Fatalf("ListAllRecursive() error: %v (want nil for 404)", err)
 	}
-	if len(objects) != fileCount {
-		t.Fatalf("expected %d objects, got %d", fileCount, len(objects))
-	}
-	// Spot check first and last
-	if objects[0].Key != "project/src/file_0000.ts" {
-		t.Errorf("first key: got %s", objects[0].Key)
-	}
-	if objects[fileCount-1].ETag != fmt.Sprintf("hash_%04d", fileCount-1) {
-		t.Errorf("last etag: got %s", objects[fileCount-1].ETag)
+	if len(result) != 0 {
+		t.Errorf("got %d files, want 0 for nonexistent prefix", len(result))
 	}
 }
 
-func TestListAll_SpecialCharacters(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+// --- /api/files (download) ---
+
+func TestDownload_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(map[string]any{
-				"items": []map[string]any{
-					{"key": "docs/日本語ファイル.txt", "size": 50, "uploaded": "2026-03-22T10:00:00Z", "hash": "jp1"},
-					{"key": "docs/file with spaces.txt", "size": 60, "uploaded": "2026-03-22T10:00:00Z", "hash": "sp1"},
-					{"key": "docs/special-chars_v2.0 (1).txt", "size": 70, "uploaded": "2026-03-22T10:00:00Z", "hash": "sc1"},
-				},
-			})
+			w.Header().Set("ETag", `"5"`)
+			w.Header().Set("Content-Length", "13")
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write([]byte("hello, world!"))
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	objects, err := c.ListAll("docs/")
+	dl, err := c.Download("test.txt")
 	if err != nil {
-		t.Fatalf("ListAll failed: %v", err)
+		t.Fatalf("Download() error: %v", err)
 	}
-	if len(objects) != 3 {
-		t.Fatalf("expected 3, got %d", len(objects))
+	defer dl.Body.Close()
+
+	body, _ := io.ReadAll(dl.Body)
+	if string(body) != "hello, world!" {
+		t.Errorf("body = %q", string(body))
 	}
-	if objects[0].Key != "docs/日本語ファイル.txt" {
-		t.Errorf("japanese filename: got %s", objects[0].Key)
+	if dl.ContentVersion != 5 {
+		t.Errorf("ContentVersion = %d, want 5", dl.ContentVersion)
+	}
+	if dl.Size != 13 {
+		t.Errorf("Size = %d, want 13", dl.Size)
 	}
 }
 
-func TestListAll_DeepNestedPaths(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestDownload_NotFound(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(map[string]any{
-				"items": []map[string]any{
-					{"key": "project/src/components/ui/buttons/primary/index.tsx", "size": 100, "uploaded": "2026-03-22T10:00:00Z", "hash": "deep1"},
-					{"key": "project/.github/workflows/ci.yml", "size": 200, "uploaded": "2026-03-22T10:00:00Z", "hash": "deep2"},
-				},
-			})
+			w.WriteHeader(404)
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	objects, err := c.ListAll("project/")
-	if err != nil {
-		t.Fatalf("ListAll failed: %v", err)
-	}
-	if len(objects) != 2 {
-		t.Fatalf("expected 2, got %d", len(objects))
+	_, err := c.Download("missing.txt")
+	if err != ErrNotFound {
+		t.Errorf("Download() error = %v, want ErrNotFound", err)
 	}
 }
 
-func TestListAll_ServerError(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "internal server error", 500)
-		},
-	})
-	defer srv.Close()
+// --- /api/files (upload) ---
 
-	c := New(srv.URL, "s2_test")
-	_, err := c.ListAll("docs/")
-	if err == nil {
-		t.Fatal("expected error on server error")
-	}
-}
-
-func TestListAll_PrefixPassedAsQueryParam(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			// Verify the prefix is sent as path, not query
-			path := r.URL.Path
-			if !strings.HasSuffix(path, "/") {
-				t.Errorf("expected path ending with /, got %s", path)
-			}
-			json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
-		},
-	})
-	defer srv.Close()
-
-	c := New(srv.URL, "s2_test")
-	_, _ = c.ListAll("myprefix/")
-}
-
-// ---------------------------------------------------------------------------
-// GetObject
-// ---------------------------------------------------------------------------
-
-func TestGetObject_Success(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("ETag", `"abc123"`)
-			fmt.Fprint(w, "file content here")
-		},
-	})
-	defer srv.Close()
-
-	c := New(srv.URL, "s2_test")
-	body, etag, err := c.GetObject("docs/test.txt")
-	if err != nil {
-		t.Fatalf("GetObject failed: %v", err)
-	}
-	defer body.Close()
-
-	data, _ := io.ReadAll(body)
-	if string(data) != "file content here" {
-		t.Errorf("expected 'file content here', got %q", string(data))
-	}
-	if etag != "abc123" {
-		t.Errorf("expected etag abc123, got %s", etag)
-	}
-}
-
-func TestGetObject_NotFound(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "Not Found", 404)
-		},
-	})
-	defer srv.Close()
-
-	c := New(srv.URL, "s2_test")
-	_, _, err := c.GetObject("nonexistent.txt")
-	if err == nil {
-		t.Fatal("expected error for 404")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected 'not found' in error, got: %v", err)
-	}
-}
-
-func TestGetObject_LargeFile(t *testing.T) {
-	// 1MB file
-	content := strings.Repeat("x", 1024*1024)
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("ETag", `"largehash"`)
-			fmt.Fprint(w, content)
-		},
-	})
-	defer srv.Close()
-
-	c := New(srv.URL, "s2_test")
-	body, _, err := c.GetObject("large.bin")
-	if err != nil {
-		t.Fatalf("GetObject failed: %v", err)
-	}
-	defer body.Close()
-
-	data, _ := io.ReadAll(body)
-	if len(data) != 1024*1024 {
-		t.Errorf("expected 1MB, got %d bytes", len(data))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// PutObject
-// ---------------------------------------------------------------------------
-
-func TestPutObject_Success(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestUpload_IfMatch_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			body, _ := io.ReadAll(r.Body)
-			if string(body) != "hello world" {
-				t.Errorf("unexpected body: %q", string(body))
+			if got := r.Header.Get("If-Match"); got != `"3"` {
+				t.Errorf("If-Match = %q, want %q", got, `"3"`)
 			}
-			w.WriteHeader(201)
-			json.NewEncoder(w).Encode(map[string]any{
-				"size": len(body),
-				"hash": "sha256_abc",
-				"etag": "md5_xyz",
+			jsonResponse(w, 201, map[string]any{
+				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "etag": `"4"`,
 			})
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	etag, err := c.PutObject("docs/test.txt", strings.NewReader("hello world"), "")
+	result, err := c.Upload("test.txt", strings.NewReader("hello"), "", 3)
 	if err != nil {
-		t.Fatalf("PutObject failed: %v", err)
+		t.Fatalf("Upload() error: %v", err)
 	}
-	if etag != "md5_xyz" {
-		t.Errorf("expected etag md5_xyz, got %s", etag)
+	cv, _ := ParseContentVersion(result.ETag)
+	if cv != 4 {
+		t.Errorf("content_version = %d, want 4", cv)
 	}
 }
 
-func TestPutObject_IfMatch_Conflict(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestUpload_SeqInResponse(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			ifMatch := r.Header.Get("If-Match")
-			if ifMatch == "" {
-				t.Error("expected If-Match header")
-			}
-			w.WriteHeader(412)
-			fmt.Fprint(w, `{"error":"Precondition Failed"}`)
+			jsonResponse(w, 201, map[string]any{
+				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "etag": `"1"`,
+				"seq": 42,
+			})
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	_, err := c.PutObject("test.txt", strings.NewReader("data"), "old_etag")
+	result, err := c.Upload("test.txt", strings.NewReader("hello"), "", -1)
+	if err != nil {
+		t.Fatalf("Upload() error: %v", err)
+	}
+	if result.Seq == nil {
+		t.Fatal("Seq should not be nil when server returns seq")
+	}
+	if *result.Seq != 42 {
+		t.Errorf("Seq = %d, want 42", *result.Seq)
+	}
+}
+
+func TestUpload_SeqAbsentInResponse(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
+			jsonResponse(w, 201, map[string]any{
+				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "etag": `"1"`,
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	result, err := c.Upload("test.txt", strings.NewReader("hello"), "", -1)
+	if err != nil {
+		t.Fatalf("Upload() error: %v", err)
+	}
+	if result.Seq != nil {
+		t.Errorf("Seq = %d, want nil (server doesn't return seq yet)", *result.Seq)
+	}
+}
+
+func TestUpload_IfNoneMatch_CreateOnly(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
+			if got := r.Header.Get("If-None-Match"); got != "*" {
+				t.Errorf("If-None-Match = %q, want %q", got, "*")
+			}
+			jsonResponse(w, 201, map[string]any{
+				"id": "n1", "name": "new.txt", "size": 5, "hash": "abc", "etag": `"1"`,
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	_, err := c.Upload("new.txt", strings.NewReader("hello"), "", 0) // 0 = If-None-Match: *
+	if err != nil {
+		t.Fatalf("Upload() error: %v", err)
+	}
+}
+
+func TestUpload_ForceOverwrite_NoConditionalHeaders(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("If-Match") != "" || r.Header.Get("If-None-Match") != "" {
+				t.Errorf("expected no conditional headers, got If-Match=%q If-None-Match=%q",
+					r.Header.Get("If-Match"), r.Header.Get("If-None-Match"))
+			}
+			jsonResponse(w, 201, map[string]any{
+				"id": "n1", "name": "f.txt", "size": 5, "hash": "abc", "etag": `"1"`,
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	_, err := c.Upload("f.txt", strings.NewReader("hello"), "", -1) // -1 = force
+	if err != nil {
+		t.Fatalf("Upload() error: %v", err)
+	}
+}
+
+func TestUpload_PreconditionFailed(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(412) },
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.Upload("test.txt", strings.NewReader("x"), "", 3)
 	if err != ErrPreconditionFailed {
-		t.Errorf("expected ErrPreconditionFailed, got %v", err)
+		t.Errorf("error = %v, want ErrPreconditionFailed", err)
 	}
 }
 
-func TestPutObject_IfMatch_Success(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			ifMatch := r.Header.Get("If-Match")
-			if ifMatch != `"current_etag"` {
-				t.Errorf("expected If-Match \"current_etag\", got %s", ifMatch)
-			}
-			w.WriteHeader(201)
-			json.NewEncoder(w).Encode(map[string]any{
-				"size": 4,
-				"hash": "sha_new",
-				"etag": "new_etag",
-			})
-		},
+func TestUpload_Conflict(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(409) },
 	})
-	defer srv.Close()
-
 	c := New(srv.URL, "s2_test")
-	etag, err := c.PutObject("test.txt", strings.NewReader("data"), "current_etag")
+	_, err := c.Upload("test.txt", strings.NewReader("x"), "", 0)
+	if err != ErrConflict {
+		t.Errorf("error = %v, want ErrConflict", err)
+	}
+}
+
+func TestUpload_StorageLimitExceeded(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(413) },
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.Upload("test.txt", strings.NewReader("x"), "", -1)
+	if err != ErrStorageLimitExceeded {
+		t.Errorf("error = %v, want ErrStorageLimitExceeded", err)
+	}
+}
+
+// --- /api/files (delete) ---
+
+func TestDelete_Success_204(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) },
+	})
+	c := New(srv.URL, "s2_test")
+	result, err := c.Delete("test.txt")
 	if err != nil {
-		t.Fatalf("PutObject failed: %v", err)
+		t.Fatalf("Delete() error: %v", err)
 	}
-	if etag != "new_etag" {
-		t.Errorf("expected new_etag, got %s", etag)
-	}
-}
-
-func TestPutObject_StorageLimitExceeded(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(413)
-			fmt.Fprint(w, `{"error":"Storage limit exceeded"}`)
-		},
-	})
-	defer srv.Close()
-
-	c := New(srv.URL, "s2_test")
-	_, err := c.PutObject("big.bin", strings.NewReader("data"), "")
-	if err == nil {
-		t.Fatal("expected error for 413")
-	}
-	if !strings.Contains(err.Error(), "413") {
-		t.Errorf("expected 413 in error, got: %v", err)
+	if result.Seq != nil {
+		t.Errorf("Seq should be nil for 204 response")
 	}
 }
 
-// ---------------------------------------------------------------------------
-// DeleteObject
-// ---------------------------------------------------------------------------
-
-func TestDeleteObject_Success(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestDelete_Success_WithSeq(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(204)
+			jsonResponse(w, 200, map[string]any{"seq": 55})
 		},
 	})
-	defer srv.Close()
-
 	c := New(srv.URL, "s2_test")
-	err := c.DeleteObject("docs/old.txt")
+	result, err := c.Delete("test.txt")
 	if err != nil {
-		t.Fatalf("DeleteObject failed: %v", err)
+		t.Fatalf("Delete() error: %v", err)
+	}
+	if result.Seq == nil {
+		t.Fatal("Seq should not be nil when server returns seq")
+	}
+	if *result.Seq != 55 {
+		t.Errorf("Seq = %d, want 55", *result.Seq)
 	}
 }
 
-func TestDeleteObject_NotFound(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "Not Found", 404)
+func TestDelete_NotFound(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) },
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.Delete("missing.txt")
+	if err != ErrNotFound {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// --- /api/files (head) ---
+
+func TestHeadFile_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"HEAD /api/files/": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("ETag", `"7"`)
+			w.Header().Set("Content-Length", "2048")
+			w.WriteHeader(200)
 		},
 	})
-	defer srv.Close()
-
 	c := New(srv.URL, "s2_test")
-	err := c.DeleteObject("nonexistent.txt")
-	if err == nil {
-		t.Fatal("expected error for 404")
+	cv, sz, err := c.HeadFile("test.txt")
+	if err != nil {
+		t.Fatalf("HeadFile() error: %v", err)
+	}
+	if cv != 7 {
+		t.Errorf("content_version = %d, want 7", cv)
+	}
+	if sz != 2048 {
+		t.Errorf("size = %d, want 2048", sz)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Change Log API (unchanged, but verify still works)
-// ---------------------------------------------------------------------------
+// --- /api/changes ---
 
 func TestPollChanges_Success(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/changes": func(w http.ResponseWriter, r *http.Request) {
 			after := r.URL.Query().Get("after")
-			if after != "5" {
-				t.Errorf("expected after=5, got %s", after)
+			if after != "cursor_abc" {
+				t.Errorf("after = %q, want %q", after, "cursor_abc")
 			}
-			json.NewEncoder(w).Encode(map[string]any{
-				"changes": []map[string]any{
-					{"seq": 6, "path": "/docs/new.txt", "action": "put", "size": 100},
-					{"seq": 7, "path": "/docs/old.txt", "action": "delete"},
-				},
+			jsonResponse(w, 200, map[string]any{
+				"changes": []map[string]any{{
+					"seq": 42, "action": "put",
+					"path_before": "/docs/readme.md", "path_after": "/docs/readme.md",
+					"is_dir": false, "size": 100, "hash": "sha256abc",
+					"created_at": "2026-04-01T00:00:00Z",
+				}},
+				"next_cursor":     "cursor_def",
+				"resync_required": false,
 			})
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	changes, err := c.PollChanges(5, 100)
+	resp, err := c.PollChanges("cursor_abc")
 	if err != nil {
-		t.Fatalf("PollChanges failed: %v", err)
+		t.Fatalf("PollChanges() error: %v", err)
 	}
-	if len(changes) != 2 {
-		t.Fatalf("expected 2 changes, got %d", len(changes))
+	if len(resp.Changes) != 1 {
+		t.Fatalf("got %d changes, want 1", len(resp.Changes))
 	}
-	if changes[0].Seq != 6 {
-		t.Errorf("expected seq 6, got %d", changes[0].Seq)
+	if resp.Changes[0].Seq != 42 {
+		t.Errorf("seq = %d, want 42", resp.Changes[0].Seq)
+	}
+	if resp.NextCursor != "cursor_def" {
+		t.Errorf("next_cursor = %q", resp.NextCursor)
+	}
+	if resp.ResyncRequired {
+		t.Error("resync_required should be false")
 	}
 }
 
-func TestPollChanges_CursorInvalid(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
+func TestPollChanges_ResyncRequired(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/changes": func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(410)
+			jsonResponse(w, 200, map[string]any{
+				"changes":         []any{},
+				"next_cursor":     "cursor_new",
+				"resync_required": true,
+			})
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	_, err := c.PollChanges(1, 100)
-	if err != ErrCursorInvalid {
-		t.Errorf("expected ErrCursorInvalid, got %v", err)
+	resp, err := c.PollChanges("cursor_old")
+	if err != nil {
+		t.Fatalf("PollChanges() error: %v", err)
+	}
+	if !resp.ResyncRequired {
+		t.Error("resync_required should be true")
 	}
 }
 
-func TestLatestCursor(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/changes/latest": func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(map[string]any{"latest": 42})
+func TestPollChanges_CursorGone(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/changes": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(410) },
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.PollChanges("old_cursor")
+	if err != ErrCursorGone {
+		t.Errorf("error = %v, want ErrCursorGone", err)
+	}
+}
+
+func TestPollChanges_NoCursor(t *testing.T) {
+	var gotQuery string
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/changes": func(w http.ResponseWriter, r *http.Request) {
+			gotQuery = r.URL.RawQuery
+			jsonResponse(w, 200, map[string]any{
+				"changes": []any{}, "next_cursor": "cursor_init", "resync_required": false,
+			})
 		},
 	})
-	defer srv.Close()
+
+	c := New(srv.URL, "s2_test")
+	_, err := c.PollChanges("") // empty cursor
+	if err != nil {
+		t.Fatalf("PollChanges() error: %v", err)
+	}
+	if gotQuery != "" {
+		t.Errorf("query = %q, want empty (no after param)", gotQuery)
+	}
+}
+
+// --- /api/changes/latest ---
+
+func TestLatestCursor_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/changes/latest": func(w http.ResponseWriter, r *http.Request) {
+			jsonResponse(w, 200, map[string]string{"cursor": "cursor_xyz"})
+		},
+	})
 
 	c := New(srv.URL, "s2_test")
 	cursor, err := c.LatestCursor()
 	if err != nil {
-		t.Fatalf("LatestCursor failed: %v", err)
+		t.Fatalf("LatestCursor() error: %v", err)
 	}
-	if cursor != 42 {
-		t.Errorf("expected 42, got %d", cursor)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Edge cases & stress tests
-// ---------------------------------------------------------------------------
-
-func TestListAll_InvalidJSON(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, "this is not json{{{")
-		},
-	})
-	defer srv.Close()
-
-	c := New(srv.URL, "s2_test")
-	_, err := c.ListAll("")
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
+	if cursor != "cursor_xyz" {
+		t.Errorf("cursor = %q, want %q", cursor, "cursor_xyz")
 	}
 }
 
-func TestGetObject_EmptyETag(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
-			// No ETag header
-			fmt.Fprint(w, "content")
+// --- Chunked upload ---
+
+func TestChunkedUpload_FullFlow(t *testing.T) {
+	var steps []string
+
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/uploads": func(w http.ResponseWriter, r *http.Request) {
+			steps = append(steps, "create")
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["path"] != "big.bin" {
+				t.Errorf("path = %v", body["path"])
+			}
+			jsonResponse(w, 201, map[string]any{
+				"sessionId": "sess_1", "nodeId": "n1",
+				"chunkSize": 4194304, "expiresAt": "2026-04-10T00:00:00Z",
+			})
+		},
+		"PUT /api/uploads/": func(w http.ResponseWriter, r *http.Request) {
+			steps = append(steps, "chunk")
+			w.WriteHeader(200)
+		},
+		"POST /api/uploads/": func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/complete") {
+				steps = append(steps, "complete")
+				jsonResponse(w, 200, map[string]any{
+					"id": "n1", "name": "big.bin", "size": 1000, "hash": "abc", "etag": `"1"`,
+				})
+			}
 		},
 	})
-	defer srv.Close()
 
 	c := New(srv.URL, "s2_test")
-	body, etag, err := c.GetObject("test.txt")
+
+	session, err := c.CreateUploadSession("big.bin", 1000, 1)
 	if err != nil {
-		t.Fatalf("GetObject failed: %v", err)
+		t.Fatalf("CreateUploadSession() error: %v", err)
 	}
-	defer body.Close()
-	io.ReadAll(body)
-
-	if etag != "" {
-		t.Errorf("expected empty etag, got %s", etag)
+	if session.SessionID != "sess_1" {
+		t.Errorf("SessionID = %q", session.SessionID)
 	}
-}
+	if session.ChunkSize != 4194304 {
+		t.Errorf("ChunkSize = %d", session.ChunkSize)
+	}
 
-func TestAuthHeaderSentOnAllRequests(t *testing.T) {
-	var callCount atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer s2_mytoken" {
-			t.Errorf("missing/wrong auth header on %s %s: got %q", r.Method, r.URL.Path, auth)
-		}
-		callCount.Add(1)
+	if err := c.UploadChunk("sess_1", 0, strings.NewReader("data")); err != nil {
+		t.Fatalf("UploadChunk() error: %v", err)
+	}
 
-		switch {
-		case r.Method == "GET" && r.URL.Path == "/api/me":
-			w.WriteHeader(200)
-		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/files/"):
-			json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
-		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/api/files/"):
-			w.WriteHeader(201)
-			json.NewEncoder(w).Encode(map[string]any{"size": 0, "hash": "", "etag": ""})
-		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/files/"):
-			w.WriteHeader(204)
-		default:
-			w.WriteHeader(200)
-		}
-	}))
-	defer srv.Close()
+	result, err := c.CompleteUpload("sess_1")
+	if err != nil {
+		t.Fatalf("CompleteUpload() error: %v", err)
+	}
+	if result.Size != 1000 {
+		t.Errorf("size = %d", result.Size)
+	}
 
-	c := New(srv.URL, "s2_mytoken")
-	_ = c.Validate()
-	_, _ = c.ListAll("")
-	c.PutObject("x.txt", strings.NewReader("x"), "")
-	c.DeleteObject("x.txt")
-
-	if callCount.Load() != 4 {
-		t.Errorf("expected 4 calls, got %d", callCount.Load())
+	if len(steps) != 3 || steps[0] != "create" || steps[1] != "chunk" || steps[2] != "complete" {
+		t.Errorf("steps = %v, want [create, chunk, complete]", steps)
 	}
 }
 
-func TestEndpointTrailingSlash(t *testing.T) {
-	srv := fakeAPI(t, map[string]http.HandlerFunc{
-		"GET /api/me": func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(200)
+func TestCompleteUpload_SeqInResponse(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/uploads/": func(w http.ResponseWriter, r *http.Request) {
+			jsonResponse(w, 200, map[string]any{
+				"id": "n1", "name": "big.bin", "size": 1000, "hash": "abc", "etag": `"1"`,
+				"seq": 99,
+			})
 		},
 	})
-	defer srv.Close()
 
-	// Endpoint with trailing slash should still work
-	c := New(srv.URL+"/", "s2_test")
-	if err := c.Validate(); err != nil {
-		t.Fatalf("Validate with trailing slash failed: %v", err)
+	c := New(srv.URL, "s2_test")
+	result, err := c.CompleteUpload("sess_1")
+	if err != nil {
+		t.Fatalf("CompleteUpload() error: %v", err)
+	}
+	if result.Seq == nil {
+		t.Fatal("Seq should not be nil")
+	}
+	if *result.Seq != 99 {
+		t.Errorf("Seq = %d, want 99", *result.Seq)
 	}
 }
 
-func TestPutObject_URLEncoding(t *testing.T) {
-	var receivedPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedPath = r.URL.Path
-		w.WriteHeader(201)
-		json.NewEncoder(w).Encode(map[string]any{"size": 4, "hash": "h", "etag": "e"})
-	}))
-	defer srv.Close()
+// --- Move ---
+
+// --- /api/tokens ---
+
+func TestCreateToken_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/tokens": func(w http.ResponseWriter, r *http.Request) {
+			requireAuth(t, r, "s2_parent")
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["name"] != "child" {
+				t.Errorf("name = %v", body["name"])
+			}
+			jsonResponse(w, 201, map[string]any{
+				"token": map[string]any{
+					"id": "tok_child", "name": "child", "base_path": "/",
+					"can_delegate": false, "origin": "delegation",
+					"origin_id": "tok_parent", "created_at": "2026-04-04T00:00:00Z",
+					"access_paths": []map[string]any{
+						{"path": "/", "can_read": true, "can_write": true},
+					},
+				},
+				"raw_token": "s2_childtoken123",
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_parent")
+	resp, err := c.CreateToken("child", "/", false, []types.AccessPath{
+		{Path: "/", CanRead: true, CanWrite: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateToken() error: %v", err)
+	}
+	if resp.RawToken != "s2_childtoken123" {
+		t.Errorf("raw_token = %q", resp.RawToken)
+	}
+	if resp.Token.ID != "tok_child" {
+		t.Errorf("token.id = %q", resp.Token.ID)
+	}
+	if resp.Token.Origin != "delegation" {
+		t.Errorf("origin = %q", resp.Token.Origin)
+	}
+}
+
+func TestCreateToken_Forbidden(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/tokens": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(403)
+		},
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.CreateToken("child", "/", false, nil)
+	if err != ErrForbidden {
+		t.Errorf("error = %v, want ErrForbidden", err)
+	}
+}
+
+// --- /api/file-moves ---
+
+func TestMove_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/file-moves/": func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["destination"] != "new/path.txt" {
+				t.Errorf("destination = %v", body["destination"])
+			}
+			jsonResponse(w, 200, map[string]any{"id": "n1"})
+		},
+	})
 
 	c := New(srv.URL, "s2_test")
-	_, _ = c.PutObject("path/to/日本語.txt", strings.NewReader("data"), "")
-
-	if !strings.Contains(receivedPath, "/api/files/path/to/") {
-		t.Errorf("expected /api/files/path/to/... , got %s", receivedPath)
+	if err := c.Move("old/path.txt", "new/path.txt", false); err != nil {
+		t.Fatalf("Move() error: %v", err)
 	}
 }

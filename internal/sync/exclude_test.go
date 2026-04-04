@@ -9,59 +9,92 @@ import (
 func TestDefaultExclude(t *testing.T) {
 	exclude := DefaultExclude()
 
-	tests := []struct {
-		path string
-		want bool
-	}{
-		{".git", true},
-		{".git/config", true},
-		{"node_modules", true},
-		{"node_modules/pkg/index.js", true},
-		{".DS_Store", true},
-		{"Thumbs.db", true},
-		{"file.swp", true},
-		{"file.swo", true},
-		{"file~", true},
-		{"readme.md", false},
-		{"src/main.go", false},
+	shouldExclude := []string{
+		".git",
+		".git/config",
+		"node_modules",
+		"node_modules/pkg/index.js",
+		".DS_Store",
+		"Thumbs.db",
+		"desktop.ini",
+		"file.swp",
+		"file.swo",
+		"file~",
+		"._document.pdf",    // macOS resource fork
+		"._.DS_Store",       // macOS
+		".s2",               // hard exclude
+		".s2/state.json",    // hard exclude
+		"file.sync-conflict-20260101-120000.txt", // hard exclude
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			got := exclude(tt.path)
-			if got != tt.want {
-				t.Errorf("exclude(%q) = %v, want %v", tt.path, got, tt.want)
-			}
-		})
+	for _, path := range shouldExclude {
+		if !exclude(path) {
+			t.Errorf("should exclude %q", path)
+		}
+	}
+
+	shouldNotExclude := []string{
+		"readme.md",
+		"docs/notes.txt",
+		"src/main.go",
+		".gitignore", // not .git itself
+		"my_module",  // not node_modules
+	}
+
+	for _, path := range shouldNotExclude {
+		if exclude(path) {
+			t.Errorf("should not exclude %q", path)
+		}
 	}
 }
 
-func TestLoadExcludeWithS2Ignore(t *testing.T) {
+func TestLoadExclude_WithS2Ignore(t *testing.T) {
 	dir := t.TempDir()
-
-	// Create .s2ignore
-	ignoreContent := "*.log\n# comment\nbuild\n"
-	os.WriteFile(filepath.Join(dir, ".s2ignore"), []byte(ignoreContent), 0644)
+	os.WriteFile(filepath.Join(dir, ".s2ignore"), []byte("*.log\nbuild\n# comment\n\n"), 0600)
 
 	exclude := LoadExclude(dir)
 
-	tests := []struct {
-		path string
-		want bool
-	}{
-		{"app.log", true},       // from .s2ignore
-		{"build", true},         // from .s2ignore
-		{"build/out.js", true},  // directory match
-		{".git", true},          // default
-		{"readme.md", false},
+	if !exclude("app.log") {
+		t.Error("should exclude *.log")
+	}
+	if !exclude("build") {
+		t.Error("should exclude build")
+	}
+	if !exclude("build/output.js") {
+		t.Error("should exclude build/output.js")
+	}
+	// Default excludes still work
+	if !exclude(".DS_Store") {
+		t.Error("should still exclude .DS_Store")
+	}
+	if exclude("readme.md") {
+		t.Error("should not exclude readme.md")
+	}
+}
+
+func TestLoadExclude_NoS2Ignore(t *testing.T) {
+	dir := t.TempDir()
+	// No .s2ignore file
+	exclude := LoadExclude(dir)
+	// Should still work with defaults
+	if !exclude(".git") {
+		t.Error("should exclude .git")
+	}
+}
+
+func TestHardExcludes_CannotBeOverridden(t *testing.T) {
+	exclude := DefaultExclude()
+
+	// .s2 is always excluded
+	if !exclude(".s2") {
+		t.Error(".s2 should always be excluded")
+	}
+	if !exclude(".s2/state.json") {
+		t.Error(".s2/state.json should always be excluded")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			got := exclude(tt.path)
-			if got != tt.want {
-				t.Errorf("exclude(%q) = %v, want %v", tt.path, got, tt.want)
-			}
-		})
+	// .sync-conflict-* is always excluded
+	if !exclude("doc.sync-conflict-20260101-120000.txt") {
+		t.Error("sync-conflict files should always be excluded")
 	}
 }
