@@ -309,9 +309,12 @@ func executeConflict(localPath, remoteKey, relPath, localRoot string, c *client.
 	// Download remote version
 	dl, err := c.Download(remoteKey)
 	if err != nil {
-		// Remote might be deleted in delete-vs-change conflict
-		fmt.Printf("conflict (remote unavailable, pushing local): %s\n", relPath)
-		return nil
+		if err == client.ErrNotFound {
+			// Remote was deleted; push local to resolve conflict (local wins).
+			fmt.Printf("conflict (remote deleted, pushing local): %s\n", relPath)
+			return conflictPushLocal(localPath, remoteKey, relPath, c, state)
+		}
+		return fmt.Errorf("download remote for conflict: %w", err)
 	}
 
 	// Write remote content to temp file so we can hash it
@@ -371,12 +374,22 @@ func executeConflict(localPath, remoteKey, relPath, localRoot string, c *client.
 	conflictRel = filepath.ToSlash(conflictRel)
 	fmt.Printf("conflict: %s (remote saved as %s)\n", relPath, conflictRel)
 
-	// Push local version to remote (local wins)
+	// Push local version to remote (local wins).
+	return conflictPushLocal(localPath, remoteKey, relPath, c, state)
+}
+
+// conflictPushLocal uploads the local file to remote, overwriting whatever is there.
+// Used to resolve conflicts where local wins and remote has been deleted or diverged.
+func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, state *State) error {
 	lf, err := os.Open(localPath)
 	if err != nil {
-		// Local might be deleted in delete-vs-change conflict
-		fmt.Printf("conflict (local deleted, remote saved): %s\n", relPath)
-		return nil
+		if os.IsNotExist(err) {
+			// Local also gone — nothing to push; clean archive entry.
+			fmt.Printf("conflict (local deleted, remote saved): %s\n", relPath)
+			delete(state.Files, relPath)
+			return nil
+		}
+		return err
 	}
 	defer lf.Close()
 
@@ -385,28 +398,28 @@ func executeConflict(localPath, remoteKey, relPath, localRoot string, c *client.
 		return err
 	}
 
-	// Record seq for self-change filtering (ADR 0033)
 	if result.Seq != nil {
 		state.AddPushedSeq(*result.Seq)
 	}
 
 	cv, _ := client.ParseContentVersion(result.ETag)
-
+	hash, err := hashFile(localPath)
+	if err != nil {
+		return err
+	}
 	info, err := os.Stat(localPath)
 	if err != nil {
 		return err
 	}
 
 	state.Files[relPath] = types.FileState{
-		LocalHash:      localHash,
+		LocalHash:      hash,
 		ContentVersion: cv,
 		Size:           info.Size(),
 		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
-
 	return nil
 }
-
 
 // conflictFileName generates a Syncthing-style conflict name with extension preserved.
 // "report.txt" → "report.sync-conflict-20260322-100000.txt"

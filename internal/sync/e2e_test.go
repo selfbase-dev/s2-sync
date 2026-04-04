@@ -523,7 +523,7 @@ func TestS15_Incremental_LocalEditRemoteDelete(t *testing.T) {
 
 func TestS16_Incremental_RemoteMove(t *testing.T) {
 	markScenario("S16")
-	t.Skip("TODO: POST /api/file-moves/{path} returns 404 in dev server — server-side route issue (ADR 0035)")
+	t.Skip("TODO: move route fixed in SEL-239, but e2e needs manual verification — un-skip after confirming")
 	env := newTestEnv(t)
 	env.skipSelfFilter = true // same token simulates remote; disable self-change filter
 	env.writeLocal("old.txt", "content")
@@ -561,7 +561,30 @@ func TestS17_Incremental_SelfPushSkipped(t *testing.T) {
 
 func TestS18_Incremental_OtherDevicePush(t *testing.T) {
 	markScenario("S18")
-	t.Skip("TODO: POST /api/tokens does not return raw_token — need create+issue in one call (SEL-236)")
+	env := newTestEnv(t)
+
+	// Create a child token to simulate a second device (SEL-240: create returns raw_token directly)
+	childResp, err := env.client.CreateToken("s18-device2", "", false, nil)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	device2 := client.New(os.Getenv("S2_ENDPOINT"), childResp.RawToken)
+
+	env.writeLocal("file.txt", "v1")
+	env.sync() // initial sync with device 1
+
+	// Device 2 pushes an update
+	if _, err := device2.Upload(env.prefix+"file.txt", strings.NewReader("v2-from-device2"), "", -1); err != nil {
+		t.Fatalf("device2 upload: %v", err)
+	}
+
+	result := env.sync() // incremental sync on device 1
+	if result.Pulled < 1 {
+		t.Errorf("pulled = %d, want >= 1 (remote change from device2 should be pulled)", result.Pulled)
+	}
+	if got := env.readLocal("file.txt"); got != "v2-from-device2" {
+		t.Errorf("local = %q, want 'v2-from-device2'", got)
+	}
 }
 
 // --- CAS / Error scenarios ---

@@ -580,6 +580,34 @@ func TestLatestCursor_Success(t *testing.T) {
 	}
 }
 
+// Bug fix: LatestCursor was missing checkStatus, so 401/403/etc. returned
+// generic errors instead of sentinel errors.
+func TestLatestCursor_Unauthorized(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/changes/latest": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(401)
+		},
+	})
+	c := New(srv.URL, "s2_bad")
+	_, err := c.LatestCursor()
+	if err != ErrUnauthorized {
+		t.Errorf("LatestCursor() error = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestLatestCursor_Forbidden(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/changes/latest": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(403)
+		},
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.LatestCursor()
+	if err != ErrForbidden {
+		t.Errorf("LatestCursor() error = %v, want ErrForbidden", err)
+	}
+}
+
 // --- Chunked upload ---
 
 func TestChunkedUpload_FullFlow(t *testing.T) {
