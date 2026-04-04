@@ -1,7 +1,6 @@
 package sync
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,32 +42,11 @@ func TestLoadState_CorruptJSON(t *testing.T) {
 	}
 }
 
-func TestLoadState_V1Migration(t *testing.T) {
-	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, ".s2"), 0700)
-	v1 := map[string]any{"version": 1, "cursor": 42, "files": map[string]any{
-		"a.txt": map[string]any{"local_hash": "abc", "remote_etag": "def", "size": 100},
-	}}
-	data, _ := json.Marshal(v1)
-	os.WriteFile(filepath.Join(dir, ".s2", "state.json"), data, 0600)
-
-	state, err := LoadState(dir)
-	if err != nil {
-		t.Fatalf("LoadState() error: %v", err)
-	}
-	if state.Cursor != "" {
-		t.Errorf("Cursor should be empty after migration, got %q", state.Cursor)
-	}
-	if len(state.Files) != 0 {
-		t.Errorf("Files should be empty after migration, got %d", len(state.Files))
-	}
-}
 
 func TestSaveState_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	state := &State{
-		RemotePrefix: "docs/",
-		Cursor:       "opaque_cursor",
+		Cursor: "opaque_cursor",
 		TokenID:      "tok_123",
 		PushedSeqs:   []int64{10, 20},
 		Files: map[string]types.FileState{

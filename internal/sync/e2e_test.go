@@ -60,13 +60,36 @@ type testEnv struct {
 	t              *testing.T
 	client         *client.Client
 	localDir       string
-	prefix         string // unique per test, relative to token's base_path
 	basePath       string // token's virtual root (e.g. "/" or "/e2e-scope/")
 	skipSelfFilter bool   // disable self-change filter (for testing remote changes with same token)
 }
 
 func newTestEnv(t *testing.T) *testEnv {
-	return newTestEnvWithToken(t, os.Getenv("S2_TOKEN"))
+	t.Helper()
+
+	endpoint := os.Getenv("S2_ENDPOINT")
+	rootToken := os.Getenv("S2_TOKEN")
+	if endpoint == "" || rootToken == "" {
+		t.Fatal("S2_ENDPOINT and S2_TOKEN must be set")
+	}
+
+	// Create a child token with a unique base_path for test isolation.
+	// Each test gets its own virtual root so tests don't interfere with each other.
+	rc := client.New(endpoint, rootToken)
+	uniqueBasePath := "/e2e-test/" + time.Now().Format("20060102-150405") + "-" + t.Name() + "/"
+	childResp, err := rc.CreateToken("e2e-"+t.Name(), uniqueBasePath, false, nil)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	c := client.New(endpoint, childResp.RawToken)
+	localDir := t.TempDir()
+
+	t.Cleanup(func() {
+		cleanRemote(c, "")
+	})
+
+	return &testEnv{t: t, client: c, localDir: localDir, basePath: uniqueBasePath}
 }
 
 func newTestEnvWithToken(t *testing.T, token string) *testEnv {
@@ -89,25 +112,21 @@ func newTestEnvWithToken(t *testing.T, token string) *testEnv {
 		basePath = "/"
 	}
 
-	// Unique prefix per test to isolate test data
-	prefix := "e2e-test-" + time.Now().Format("20060102-150405") + "-" + t.Name() + "/"
+	// Create a child token with a unique base_path for test isolation.
+	uniqueBasePath := basePath + "e2e-test/" + time.Now().Format("20060102-150405") + "-" + t.Name() + "/"
+	childResp, err := c.CreateToken("e2e-"+t.Name(), uniqueBasePath, false, nil)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
 
+	childClient := client.New(endpoint, childResp.RawToken)
 	localDir := t.TempDir()
 
 	t.Cleanup(func() {
-		cleanRemote(c, prefix)
+		cleanRemote(childClient, "")
 	})
 
-	return &testEnv{t: t, client: c, localDir: localDir, prefix: prefix, basePath: basePath}
-}
-
-// stripPrefix removes the test prefix from a change path.
-// Handles both absolute paths ("/prefix/file.txt") and base_path-relative paths ("prefix/file.txt").
-func (e *testEnv) stripPrefix(p string) string {
-	if s := strings.TrimPrefix(p, "/"+e.prefix); s != p {
-		return s
-	}
-	return strings.TrimPrefix(p, e.prefix)
+	return &testEnv{t: t, client: childClient, localDir: localDir, basePath: uniqueBasePath}
 }
 
 func cleanRemote(c *client.Client, prefix string) {
@@ -161,7 +180,7 @@ func (e *testEnv) localHasConflict(baseName string) (string, bool) {
 // putRemote uploads content to the remote server.
 func (e *testEnv) putRemote(relPath, content string) {
 	e.t.Helper()
-	_, err := e.client.Upload(e.prefix+relPath, strings.NewReader(content), "", -1)
+	_, err := e.client.Upload(relPath, strings.NewReader(content), "", -1)
 	if err != nil {
 		e.t.Fatalf("putRemote(%s): %v", relPath, err)
 	}
@@ -170,7 +189,7 @@ func (e *testEnv) putRemote(relPath, content string) {
 // readRemote downloads a file from the remote server.
 func (e *testEnv) readRemote(relPath string) string {
 	e.t.Helper()
-	dl, err := e.client.Download(e.prefix + relPath)
+	dl, err := e.client.Download(relPath)
 	if err != nil {
 		e.t.Fatalf("readRemote(%s): %v", relPath, err)
 	}
@@ -181,14 +200,14 @@ func (e *testEnv) readRemote(relPath string) string {
 
 // remoteExists checks if a file exists on the remote server.
 func (e *testEnv) remoteExists(relPath string) bool {
-	_, _, err := e.client.HeadFile(e.prefix + relPath)
+	_, _, err := e.client.HeadFile(relPath)
 	return err == nil
 }
 
 // deleteRemote deletes a file on the remote server.
 func (e *testEnv) deleteRemote(relPath string) {
 	e.t.Helper()
-	if _, err := e.client.Delete(e.prefix + relPath); err != nil {
+	if _, err := e.client.Delete(relPath); err != nil {
 		e.t.Fatalf("deleteRemote(%s): %v", relPath, err)
 	}
 }
@@ -196,7 +215,7 @@ func (e *testEnv) deleteRemote(relPath string) {
 // moveRemote moves a file on the remote server.
 func (e *testEnv) moveRemote(from, to string) {
 	e.t.Helper()
-	if err := e.client.Move(e.prefix+from, e.prefix+to, false); err != nil {
+	if err := e.client.Move(from, to, false); err != nil {
 		e.t.Fatalf("moveRemote(%s → %s): %v", from, to, err)
 	}
 }
@@ -208,7 +227,6 @@ func (e *testEnv) sync() *ExecuteResult {
 	if err != nil {
 		e.t.Fatalf("LoadState: %v", err)
 	}
-	state.RemotePrefix = e.prefix
 
 	me, err := e.client.Me()
 	if err != nil {
@@ -232,13 +250,13 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 		e.t.Fatalf("Walk: %v", err)
 	}
 
-	remoteFiles, err := e.client.ListAllRecursive(e.prefix)
+	remoteFiles, err := e.client.ListAllRecursive("")
 	if err != nil {
 		e.t.Fatalf("ListAllRecursive: %v", err)
 	}
 
 	plans := Compare(localFiles, remoteFiles, state.Files)
-	result, err := Execute(plans, e.localDir, e.prefix, e.client, state, false)
+	result, err := Execute(plans, e.localDir, "", e.client, state, false)
 	if err != nil {
 		e.t.Fatalf("Execute: %v", err)
 	}
@@ -275,7 +293,8 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	}
 
 	// Filter self-changes (disabled when skipSelfFilter is set,
-	// since test uses same token for both local sync and remote changes)
+	// since test uses same token for both local sync and remote changes).
+	// Server returns base_path-relative client paths — no prefix stripping needed.
 	var remoteChanges []types.ChangeEntry
 	for _, ch := range resp.Changes {
 		if !e.skipSelfFilter {
@@ -289,21 +308,8 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 		remoteChanges = append(remoteChanges, ch)
 	}
 
-	// Strip prefix from change paths.
-	// Root tokens: changes API returns absolute paths like "/prefix/file.txt"
-	// Scoped tokens: changes API returns base_path-relative paths like "prefix/file.txt"
-	for i := range remoteChanges {
-		strip := e.stripPrefix
-		if remoteChanges[i].PathBefore != "" {
-			remoteChanges[i].PathBefore = strip(remoteChanges[i].PathBefore)
-		}
-		if remoteChanges[i].PathAfter != "" {
-			remoteChanges[i].PathAfter = strip(remoteChanges[i].PathAfter)
-		}
-	}
-
 	plans := CompareIncremental(localFiles, state.Files, remoteChanges)
-	result, err := Execute(plans, e.localDir, e.prefix, e.client, state, false)
+	result, err := Execute(plans, e.localDir, "", e.client, state, false)
 	if err != nil {
 		e.t.Fatalf("Execute: %v", err)
 	}
@@ -580,10 +586,9 @@ func TestS18_Incremental_OtherDevicePush(t *testing.T) {
 	markScenario("S18")
 	env := newTestEnv(t)
 
-	// Create a child token to simulate a second device (SEL-240: create returns raw_token directly)
-	childResp, err := env.client.CreateToken("s18-device2", "/", false, []types.AccessPath{
-		{Path: "/", CanRead: true, CanWrite: true},
-	})
+	// Create a child token with the same base_path to simulate a second device.
+	// (SEL-240: create returns raw_token directly)
+	childResp, err := env.client.CreateToken("s18-device2", env.basePath, false, nil)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
@@ -592,8 +597,8 @@ func TestS18_Incremental_OtherDevicePush(t *testing.T) {
 	env.writeLocal("file.txt", "v1")
 	env.sync() // initial sync with device 1
 
-	// Device 2 pushes an update
-	if _, err := device2.Upload(env.prefix+"file.txt", strings.NewReader("v2-from-device2"), "", -1); err != nil {
+	// Device 2 pushes an update (paths are relative to device2's base_path)
+	if _, err := device2.Upload("file.txt", strings.NewReader("v2-from-device2"), "", -1); err != nil {
 		t.Fatalf("device2 upload: %v", err)
 	}
 
@@ -717,7 +722,6 @@ func TestS32_PullDuringLocalEdit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
-	state.RemotePrefix = env.prefix
 	me, err := env.client.Me()
 	if err != nil {
 		t.Fatalf("Me: %v", err)
@@ -735,22 +739,16 @@ func TestS32_PullDuringLocalEdit(t *testing.T) {
 		t.Fatalf("PollChanges: %v", err)
 	}
 
+	// Server returns base_path-relative client paths — no prefix stripping needed.
 	var remoteChanges []types.ChangeEntry
 	for _, ch := range resp.Changes {
-		normPrefix := "/" + env.prefix
-		if ch.PathBefore != "" {
-			ch.PathBefore = strings.TrimPrefix(ch.PathBefore, normPrefix)
-		}
-		if ch.PathAfter != "" {
-			ch.PathAfter = strings.TrimPrefix(ch.PathAfter, normPrefix)
-		}
 		remoteChanges = append(remoteChanges, ch)
 	}
 
 	plans := CompareIncremental(localFiles, state.Files, remoteChanges)
 
 	localEdited := false
-	result, err := execute(plans, env.localDir, env.prefix, env.client, state, false, executeDeps{
+	result, err := execute(plans, env.localDir, "", env.client, state, false, executeDeps{
 		beforePullCommit: func(localPath string) {
 			// Simulate concurrent local edit during pull
 			os.WriteFile(localPath, []byte("local-edit-during-pull"), 0644)
@@ -904,10 +902,10 @@ func TestScoped_CoreScenarios(t *testing.T) {
 
 // --- Cross-token sync tests ---
 
-// absPrefix returns the absolute path prefix for a scoped env's test data,
-// suitable for use by a root token (strips leading "/" from base_path).
-func (e *testEnv) absPrefix() string {
-	return strings.TrimPrefix(e.basePath, "/") + e.prefix
+// absPath returns the absolute path for a file in this env's scope,
+// suitable for use by a root token (combines base_path with relPath).
+func (e *testEnv) absPath(relPath string) string {
+	return strings.TrimPrefix(e.basePath, "/") + relPath
 }
 
 // rootClient creates a client using the root token (S2_TOKEN env var).
@@ -921,10 +919,12 @@ func rootClient(t *testing.T) *client.Client {
 func TestScoped_CrossToken(t *testing.T) {
 	t.Run("RootPushScopedPulls", func(t *testing.T) {
 		scopedEnv := scopedTestEnv(t)
-		rootEnv := newTestEnv(t)
-		rootEnv.prefix = scopedEnv.absPrefix()
+		rc := rootClient(t)
 
-		rootEnv.putRemote("shared.txt", "from root")
+		// Root token uploads to the scoped env's absolute path
+		if _, err := rc.Upload(scopedEnv.absPath("shared.txt"), strings.NewReader("from root"), "", -1); err != nil {
+			t.Fatalf("root upload: %v", err)
+		}
 
 		result := scopedEnv.sync()
 		if result.Pulled < 1 {
@@ -943,7 +943,7 @@ func TestScoped_CrossToken(t *testing.T) {
 		scopedEnv.sync()
 
 		rc := rootClient(t)
-		absPath := scopedEnv.absPrefix() + "shared.txt"
+		absPath := scopedEnv.absPath("shared.txt")
 		dl, err := rc.Download(absPath)
 		if err != nil {
 			t.Fatalf("root download: %v", err)

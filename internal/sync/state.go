@@ -11,16 +11,15 @@ import (
 
 // State represents the .s2/state.json file.
 type State struct {
-	Version      int                        `json:"version"`
-	RemotePrefix string                     `json:"remote_prefix"`
-	SyncedAt     string                     `json:"synced_at"`
-	Cursor       string                     `json:"cursor,omitempty"`
-	TokenID      string                     `json:"token_id,omitempty"`
-	PushedSeqs   []int64                    `json:"pushed_seqs,omitempty"`
-	Files        map[string]types.FileState `json:"files"`
+	Version    int                        `json:"version"`
+	SyncedAt   string                     `json:"synced_at"`
+	Cursor     string                     `json:"cursor,omitempty"`
+	TokenID    string                     `json:"token_id,omitempty"`
+	PushedSeqs []int64                    `json:"pushed_seqs,omitempty"`
+	Files      map[string]types.FileState `json:"files"`
 }
 
-const currentStateVersion = 2
+const currentStateVersion = 1
 
 // StateDir returns the .s2 directory path within the sync root.
 func StateDir(syncRoot string) string {
@@ -34,7 +33,6 @@ func StatePath(syncRoot string) string {
 
 // LoadState reads state.json from the sync root.
 // Returns an empty state if the file doesn't exist or is corrupt.
-// If the state version is old (v1), resets to empty (cursor incompatible).
 func LoadState(syncRoot string) (*State, error) {
 	path := StatePath(syncRoot)
 	data, err := os.ReadFile(path)
@@ -48,12 +46,6 @@ func LoadState(syncRoot string) (*State, error) {
 	var state State
 	if err := json.Unmarshal(data, &state); err != nil {
 		// Corrupt state: treat as first sync
-		return newEmptyState(), nil
-	}
-
-	// v1 → v2 migration: cursor format changed (int64 → opaque string),
-	// ETag changed (hash → content_version). Reset state.
-	if state.Version < currentStateVersion {
 		return newEmptyState(), nil
 	}
 

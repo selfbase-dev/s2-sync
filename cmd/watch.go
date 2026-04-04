@@ -25,12 +25,13 @@ var (
 )
 
 var watchCmd = &cobra.Command{
-	Use:   "watch <local-dir> <remote-prefix>",
+	Use:   "watch <local-dir>",
 	Short: "Watch and sync local directory with S2 remote",
-	Long: `Continuously sync between a local directory and an S2 remote prefix.
+	Long: `Continuously sync between a local directory and the S2 remote.
 
+The remote path is determined by the token's base_path.
 Watches for local file changes and polls the remote for updates. Runs until interrupted (Ctrl-C).`,
-	Args: cobra.ExactArgs(2),
+	Args: cobra.ExactArgs(1),
 	RunE: runWatch,
 }
 
@@ -141,15 +142,6 @@ func filterFsEventsWithAutoWatch(watcher *fsnotify.Watcher, localDir string, exc
 
 func runWatch(cmd *cobra.Command, args []string) error {
 	localDir := args[0]
-	remotePrefix := args[1]
-
-	// Normalize
-	if !strings.HasSuffix(remotePrefix, "/") {
-		remotePrefix += "/"
-	}
-	if strings.HasPrefix(remotePrefix, "/") {
-		remotePrefix = remotePrefix[1:]
-	}
 
 	info, err := os.Stat(localDir)
 	if err != nil {
@@ -172,11 +164,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	endpoint := viper.GetString("endpoint")
 	c := client.New(endpoint, token)
 
-	// Get token ID
+	// Get token ID; derive remotePrefix from base_path
 	me, err := c.Me()
 	if err != nil {
 		return fmt.Errorf("failed to get auth context: %w", err)
 	}
+	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
 
 	// Mutex for sync serialization
 	var syncMu sync.Mutex
@@ -281,7 +274,6 @@ func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client,
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	state.RemotePrefix = remotePrefix
 	state.TokenID = tokenID
 
 	if state.Cursor == "" {
@@ -361,17 +353,13 @@ func runIncrementalSyncInner(cmd *cobra.Command, localDir, remotePrefix string, 
 		return runInitialSyncInner(cmd, localDir, remotePrefix, c, state)
 	}
 
-	// Filter and normalize remote changes (same logic as sync.go)
+	// Filter remote changes (server already returns base_path-relative client paths)
 	var remoteChanges []types.ChangeEntry
 	for _, ch := range resp.Changes {
 		if state.IsPushedSeq(ch.Seq) {
 			continue
 		}
 		if ch.TokenID != "" && ch.TokenID == state.TokenID {
-			continue
-		}
-		ch = stripAndFilterPrefix(ch, remotePrefix)
-		if ch.Action == "" {
 			continue
 		}
 		remoteChanges = append(remoteChanges, ch)
