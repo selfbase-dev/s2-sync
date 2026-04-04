@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/selfbase-dev/s2-cli/internal/types"
 )
 
 // --- Helpers ---
@@ -195,6 +197,23 @@ func TestListDir_AddsTrailingSlash(t *testing.T) {
 	}
 }
 
+func TestListAllRecursive_404_ReturnsEmpty(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/files/": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(404)
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	result, err := c.ListAllRecursive("nonexistent/prefix/")
+	if err != nil {
+		t.Fatalf("ListAllRecursive() error: %v (want nil for 404)", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("got %d files, want 0 for nonexistent prefix", len(result))
+	}
+}
+
 // --- /api/files (download) ---
 
 func TestDownload_Success(t *testing.T) {
@@ -262,6 +281,48 @@ func TestUpload_IfMatch_Success(t *testing.T) {
 	cv, _ := ParseContentVersion(result.ETag)
 	if cv != 4 {
 		t.Errorf("content_version = %d, want 4", cv)
+	}
+}
+
+func TestUpload_SeqInResponse(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
+			jsonResponse(w, 201, map[string]any{
+				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "etag": `"1"`,
+				"seq": 42,
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	result, err := c.Upload("test.txt", strings.NewReader("hello"), "", -1)
+	if err != nil {
+		t.Fatalf("Upload() error: %v", err)
+	}
+	if result.Seq == nil {
+		t.Fatal("Seq should not be nil when server returns seq")
+	}
+	if *result.Seq != 42 {
+		t.Errorf("Seq = %d, want 42", *result.Seq)
+	}
+}
+
+func TestUpload_SeqAbsentInResponse(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
+			jsonResponse(w, 201, map[string]any{
+				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "etag": `"1"`,
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	result, err := c.Upload("test.txt", strings.NewReader("hello"), "", -1)
+	if err != nil {
+		t.Fatalf("Upload() error: %v", err)
+	}
+	if result.Seq != nil {
+		t.Errorf("Seq = %d, want nil (server doesn't return seq yet)", *result.Seq)
 	}
 }
 
@@ -339,13 +400,36 @@ func TestUpload_StorageLimitExceeded(t *testing.T) {
 
 // --- /api/files (delete) ---
 
-func TestDelete_Success(t *testing.T) {
+func TestDelete_Success_204(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) },
 	})
 	c := New(srv.URL, "s2_test")
-	if err := c.Delete("test.txt"); err != nil {
+	result, err := c.Delete("test.txt")
+	if err != nil {
 		t.Fatalf("Delete() error: %v", err)
+	}
+	if result.Seq != nil {
+		t.Errorf("Seq should be nil for 204 response")
+	}
+}
+
+func TestDelete_Success_WithSeq(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) {
+			jsonResponse(w, 200, map[string]any{"seq": 55})
+		},
+	})
+	c := New(srv.URL, "s2_test")
+	result, err := c.Delete("test.txt")
+	if err != nil {
+		t.Fatalf("Delete() error: %v", err)
+	}
+	if result.Seq == nil {
+		t.Fatal("Seq should not be nil when server returns seq")
+	}
+	if *result.Seq != 55 {
+		t.Errorf("Seq = %d, want 55", *result.Seq)
 	}
 }
 
@@ -354,7 +438,8 @@ func TestDelete_NotFound(t *testing.T) {
 		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) },
 	})
 	c := New(srv.URL, "s2_test")
-	if err := c.Delete("missing.txt"); err != ErrNotFound {
+	_, err := c.Delete("missing.txt")
+	if err != ErrNotFound {
 		t.Errorf("error = %v, want ErrNotFound", err)
 	}
 }
@@ -557,7 +642,88 @@ func TestChunkedUpload_FullFlow(t *testing.T) {
 	}
 }
 
+func TestCompleteUpload_SeqInResponse(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/uploads/": func(w http.ResponseWriter, r *http.Request) {
+			jsonResponse(w, 200, map[string]any{
+				"id": "n1", "name": "big.bin", "size": 1000, "hash": "abc", "etag": `"1"`,
+				"seq": 99,
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	result, err := c.CompleteUpload("sess_1")
+	if err != nil {
+		t.Fatalf("CompleteUpload() error: %v", err)
+	}
+	if result.Seq == nil {
+		t.Fatal("Seq should not be nil")
+	}
+	if *result.Seq != 99 {
+		t.Errorf("Seq = %d, want 99", *result.Seq)
+	}
+}
+
 // --- Move ---
+
+// --- /api/tokens ---
+
+func TestCreateToken_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/tokens": func(w http.ResponseWriter, r *http.Request) {
+			requireAuth(t, r, "s2_parent")
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["name"] != "child" {
+				t.Errorf("name = %v", body["name"])
+			}
+			jsonResponse(w, 201, map[string]any{
+				"token": map[string]any{
+					"id": "tok_child", "name": "child", "base_path": "/",
+					"can_delegate": false, "origin": "delegation",
+					"origin_id": "tok_parent", "created_at": "2026-04-04T00:00:00Z",
+					"access_paths": []map[string]any{
+						{"path": "/", "can_read": true, "can_write": true},
+					},
+				},
+				"raw_token": "s2_childtoken123",
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_parent")
+	resp, err := c.CreateToken("child", "/", false, []types.AccessPath{
+		{Path: "/", CanRead: true, CanWrite: true},
+	})
+	if err != nil {
+		t.Fatalf("CreateToken() error: %v", err)
+	}
+	if resp.RawToken != "s2_childtoken123" {
+		t.Errorf("raw_token = %q", resp.RawToken)
+	}
+	if resp.Token.ID != "tok_child" {
+		t.Errorf("token.id = %q", resp.Token.ID)
+	}
+	if resp.Token.Origin != "delegation" {
+		t.Errorf("origin = %q", resp.Token.Origin)
+	}
+}
+
+func TestCreateToken_Forbidden(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"POST /api/tokens": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(403)
+		},
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.CreateToken("child", "/", false, nil)
+	if err != ErrForbidden {
+		t.Errorf("error = %v, want ErrForbidden", err)
+	}
+}
+
+// --- /api/file-moves ---
 
 func TestMove_Success(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{

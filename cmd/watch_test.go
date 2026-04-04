@@ -35,12 +35,12 @@ func TestShouldProcessEvent(t *testing.T) {
 	}
 }
 
-func TestWatchLoop_LocalEventTriggersSyncAfterDebounce(t *testing.T) {
+func TestWatchLoop_LocalEventDebounce(t *testing.T) {
 	var syncCount atomic.Int32
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	localEvents := make(chan struct{}, 1)
+	localEvents := make(chan struct{}, 10)
 
 	go watchLoop(WatchLoopConfig{
 		SyncFn: func() error {
@@ -51,103 +51,66 @@ func TestWatchLoop_LocalEventTriggersSyncAfterDebounce(t *testing.T) {
 			return false, false, nil
 		},
 		LocalEvents:  localEvents,
-		PollInterval: 1 * time.Hour, // disable polling
+		PollInterval: 1 * time.Hour,
 		Debounce:     50 * time.Millisecond,
 		Ctx:          ctx,
 	})
 
-	// Send local event
-	localEvents <- struct{}{}
+	// Send 5 rapid events — should coalesce to 1 sync
+	for i := 0; i < 5; i++ {
+		localEvents <- struct{}{}
+		time.Sleep(10 * time.Millisecond)
+	}
 
-	// Wait for debounce + sync
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 
 	if got := syncCount.Load(); got != 1 {
-		t.Errorf("sync count = %d, want 1", got)
+		t.Errorf("sync count = %d, want 1 (debounced)", got)
 	}
 }
 
-func TestWatchLoop_PollTriggersSyncOnRemoteChanges(t *testing.T) {
-	var syncCount atomic.Int32
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go watchLoop(WatchLoopConfig{
-		SyncFn: func() error {
-			syncCount.Add(1)
-			cancel() // stop after first sync
-			return nil
-		},
-		PollFn: func() (bool, bool, error) {
-			return true, false, nil // has remote changes
-		},
-		LocalEvents:  make(chan struct{}),
-		PollInterval: 50 * time.Millisecond,
-		Debounce:     10 * time.Millisecond,
-		Ctx:          ctx,
-	})
-
-	<-ctx.Done()
-	time.Sleep(50 * time.Millisecond)
-
-	if got := syncCount.Load(); got < 1 {
-		t.Errorf("sync count = %d, want >= 1", got)
+func TestWatchLoop_PollBehavior(t *testing.T) {
+	tests := []struct {
+		name       string
+		hasChanges bool
+		needResync bool
+		wantSync   bool
+	}{
+		{"remote changes trigger sync", true, false, true},
+		{"cursor invalid triggers sync", false, true, true},
+		{"no changes no sync", false, false, false},
 	}
-}
 
-func TestWatchLoop_NeedResyncTriggersSyncOnCursorInvalid(t *testing.T) {
-	var syncCount atomic.Int32
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var syncCount atomic.Int32
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
 
-	go watchLoop(WatchLoopConfig{
-		SyncFn: func() error {
-			syncCount.Add(1)
-			cancel()
-			return nil
-		},
-		PollFn: func() (bool, bool, error) {
-			return false, true, nil // need resync
-		},
-		LocalEvents:  make(chan struct{}),
-		PollInterval: 50 * time.Millisecond,
-		Debounce:     10 * time.Millisecond,
-		Ctx:          ctx,
-	})
+			go watchLoop(WatchLoopConfig{
+				SyncFn: func() error {
+					syncCount.Add(1)
+					cancel()
+					return nil
+				},
+				PollFn: func() (bool, bool, error) {
+					return tt.hasChanges, tt.needResync, nil
+				},
+				LocalEvents:  make(chan struct{}),
+				PollInterval: 50 * time.Millisecond,
+				Debounce:     10 * time.Millisecond,
+				Ctx:          ctx,
+			})
 
-	<-ctx.Done()
-	time.Sleep(50 * time.Millisecond)
+			<-ctx.Done()
+			time.Sleep(50 * time.Millisecond)
 
-	if got := syncCount.Load(); got < 1 {
-		t.Errorf("sync count = %d, want >= 1", got)
-	}
-}
-
-func TestWatchLoop_NoSyncWhenNoChanges(t *testing.T) {
-	var syncCount atomic.Int32
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-
-	go watchLoop(WatchLoopConfig{
-		SyncFn: func() error {
-			syncCount.Add(1)
-			return nil
-		},
-		PollFn: func() (bool, bool, error) {
-			return false, false, nil // no changes
-		},
-		LocalEvents:  make(chan struct{}),
-		PollInterval: 50 * time.Millisecond,
-		Debounce:     10 * time.Millisecond,
-		Ctx:          ctx,
-	})
-
-	<-ctx.Done()
-	time.Sleep(50 * time.Millisecond)
-
-	if got := syncCount.Load(); got != 0 {
-		t.Errorf("sync count = %d, want 0 (no changes)", got)
+			got := syncCount.Load() > 0
+			if got != tt.wantSync {
+				t.Errorf("synced = %v, want %v", got, tt.wantSync)
+			}
+		})
 	}
 }
 
@@ -171,45 +134,7 @@ func TestWatchLoop_ContextCancel(t *testing.T) {
 
 	select {
 	case <-done:
-		// OK
 	case <-time.After(1 * time.Second):
 		t.Error("watchLoop did not exit after context cancel")
-	}
-}
-
-func TestWatchLoop_DebounceCoalesces(t *testing.T) {
-	var syncCount atomic.Int32
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	localEvents := make(chan struct{}, 10)
-
-	go watchLoop(WatchLoopConfig{
-		SyncFn: func() error {
-			syncCount.Add(1)
-			return nil
-		},
-		PollFn: func() (bool, bool, error) {
-			return false, false, nil
-		},
-		LocalEvents:  localEvents,
-		PollInterval: 1 * time.Hour,
-		Debounce:     100 * time.Millisecond,
-		Ctx:          ctx,
-	})
-
-	// Send 5 rapid events
-	for i := 0; i < 5; i++ {
-		localEvents <- struct{}{}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Wait for debounce
-	time.Sleep(300 * time.Millisecond)
-	cancel()
-
-	// Should coalesce to 1 sync (debounce resets on each event)
-	if got := syncCount.Load(); got != 1 {
-		t.Errorf("sync count = %d, want 1 (debounced)", got)
 	}
 }

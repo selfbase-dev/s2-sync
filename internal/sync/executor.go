@@ -87,9 +87,13 @@ func Execute(
 				result.Deleted++
 				continue
 			}
-			if err := c.Delete(remoteKey); err != nil {
+			delResult, err := c.Delete(remoteKey)
+			if err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("delete remote %s: %w", plan.Path, err))
 				continue
+			}
+			if delResult != nil && delResult.Seq != nil {
+				state.AddPushedSeq(*delResult.Seq)
 			}
 			delete(state.Files, plan.Path)
 			result.Deleted++
@@ -144,6 +148,11 @@ func executePush(localPath, remoteKey, relPath string, c *client.Client, state *
 	}
 	if err != nil {
 		return err
+	}
+
+	// Record seq for self-change filtering (ADR 0033)
+	if result.Seq != nil {
+		state.AddPushedSeq(*result.Seq)
 	}
 
 	// Parse content_version from etag
@@ -209,6 +218,11 @@ func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c
 	result, err := c.CompleteUpload(session.SessionID)
 	if err != nil {
 		return fmt.Errorf("complete upload: %w", err)
+	}
+
+	// Record seq for self-change filtering (ADR 0033)
+	if result.Seq != nil {
+		state.AddPushedSeq(*result.Seq)
 	}
 
 	cv, _ := client.ParseContentVersion(result.ETag)
@@ -369,6 +383,11 @@ func executeConflict(localPath, remoteKey, relPath, localRoot string, c *client.
 	result, err := c.Upload(remoteKey, lf, "", -1) // force overwrite
 	if err != nil {
 		return err
+	}
+
+	// Record seq for self-change filtering (ADR 0033)
+	if result.Seq != nil {
+		state.AddPushedSeq(*result.Seq)
 	}
 
 	cv, _ := client.ParseContentVersion(result.ETag)

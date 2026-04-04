@@ -186,6 +186,9 @@ func (c *Client) listRecursive(prefix, relDir string, result map[string]types.Re
 	}
 
 	listing, err := c.ListDir(path)
+	if err == ErrNotFound {
+		return nil // directory doesn't exist yet — treat as empty
+	}
 	if err != nil {
 		return err
 	}
@@ -347,26 +350,36 @@ func (c *Client) Mkdir(path string) error {
 }
 
 // Delete deletes a file (soft delete to trash).
-func (c *Client) Delete(path string) error {
+// Returns DeleteResult with optional Seq for self-change filtering.
+func (c *Client) Delete(path string) (*types.DeleteResult, error) {
 	req, err := http.NewRequest("DELETE", c.filesURL(path), nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("delete failed: %w", err)
+		return nil, fmt.Errorf("delete failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if err := checkStatus(resp); err != nil {
-		return err
+		return nil, err
 	}
-	if resp.StatusCode != 204 {
-		return fmt.Errorf("delete failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+
+	result := &types.DeleteResult{}
+
+	// Current server returns 204 (no body). Future server may return 200 with seq.
+	if resp.StatusCode == 200 {
+		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+			return nil, fmt.Errorf("failed to parse delete response: %w", err)
+		}
+	} else if resp.StatusCode != 204 {
+		return nil, fmt.Errorf("delete failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
-	return nil
+
+	return result, nil
 }
 
 // Move moves or renames a file/directory.
@@ -403,6 +416,48 @@ func (c *Client) Move(srcPath, dstPath string, overwrite bool) error {
 		return fmt.Errorf("move failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 	return nil
+}
+
+// --- Tokens ---
+
+// CreateToken creates a child token via delegation.
+func (c *Client) CreateToken(name, basePath string, canDelegate bool, accessPaths []types.AccessPath) (*types.CreateTokenResponse, error) {
+	req := types.CreateTokenRequest{
+		Name:        name,
+		BasePath:    basePath,
+		CanDelegate: canDelegate,
+		AccessPaths: accessPaths,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequest("POST", c.url("/api/tokens"), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(httpReq)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("create token failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 201 {
+		return nil, fmt.Errorf("create token failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var result types.CreateTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to parse create token response: %w", err)
+	}
+	return &result, nil
 }
 
 // --- Chunked Upload ---

@@ -60,6 +60,31 @@ type SyncPlan struct {
 	Action SyncAction
 }
 
+// --- API request types ---
+
+// CreateTokenRequest for POST /api/tokens.
+type CreateTokenRequest struct {
+	Name        string       `json:"name"`
+	BasePath    string       `json:"base_path,omitempty"`
+	CanDelegate bool         `json:"can_delegate,omitempty"`
+	AccessPaths []AccessPath `json:"access_paths"`
+}
+
+// CreateTokenResponse from POST /api/tokens.
+type CreateTokenResponse struct {
+	Token struct {
+		ID          string       `json:"id"`
+		Name        string       `json:"name"`
+		BasePath    string       `json:"base_path"`
+		CanDelegate bool         `json:"can_delegate"`
+		Origin      string       `json:"origin"`
+		OriginID    *string      `json:"origin_id"`
+		CreatedAt   string       `json:"created_at"`
+		AccessPaths []AccessPath `json:"access_paths"`
+	} `json:"token"`
+	RawToken string `json:"raw_token"`
+}
+
 // --- API response types (matching OpenAPI spec) ---
 
 // MeResponse from GET /api/me (token auth).
@@ -99,6 +124,12 @@ type UploadResult struct {
 	Size int64  `json:"size"`
 	Hash string `json:"hash"`
 	ETag string `json:"etag"`
+	Seq  *int64 `json:"seq"` // changelog seq for self-change filtering (ADR 0035 #3)
+}
+
+// DeleteResult from DELETE /api/files/{path}.
+type DeleteResult struct {
+	Seq *int64 `json:"seq"` // changelog seq for self-change filtering (ADR 0035 #3)
 }
 
 // ChangeEntry from GET /api/changes.
