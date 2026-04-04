@@ -523,7 +523,6 @@ func TestS15_Incremental_LocalEditRemoteDelete(t *testing.T) {
 
 func TestS16_Incremental_RemoteMove(t *testing.T) {
 	markScenario("S16")
-	t.Skip("TODO: move route fixed in SEL-239, but e2e needs manual verification — un-skip after confirming")
 	env := newTestEnv(t)
 	env.skipSelfFilter = true // same token simulates remote; disable self-change filter
 	env.writeLocal("old.txt", "content")
@@ -564,7 +563,9 @@ func TestS18_Incremental_OtherDevicePush(t *testing.T) {
 	env := newTestEnv(t)
 
 	// Create a child token to simulate a second device (SEL-240: create returns raw_token directly)
-	childResp, err := env.client.CreateToken("s18-device2", "", false, nil)
+	childResp, err := env.client.CreateToken("s18-device2", "/", false, []types.AccessPath{
+		{Path: "/", CanRead: true, CanWrite: true},
+	})
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}

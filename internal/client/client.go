@@ -422,6 +422,9 @@ func (c *Client) Move(srcPath, dstPath string, overwrite bool) error {
 
 // CreateToken creates a child token via delegation.
 func (c *Client) CreateToken(name, basePath string, canDelegate bool, accessPaths []types.AccessPath) (*types.CreateTokenResponse, error) {
+	if accessPaths == nil {
+		accessPaths = []types.AccessPath{}
+	}
 	req := types.CreateTokenRequest{
 		Name:        name,
 		BasePath:    basePath,
