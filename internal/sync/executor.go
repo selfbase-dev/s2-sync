@@ -2,6 +2,7 @@ package sync
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,10 @@ import (
 	"github.com/selfbase-dev/s2-cli/internal/client"
 	"github.com/selfbase-dev/s2-cli/internal/types"
 )
+
+// errPullAborted is returned by executePull when a concurrent local edit is
+// detected after download. The caller treats this as a conflict, not an error.
+var errPullAborted = errors.New("pull aborted: local file modified during download")
 
 // ChunkedUploadThreshold is the file size above which chunked upload is used.
 const ChunkedUploadThreshold = 10 * 1024 * 1024 // 10 MB
@@ -25,6 +30,15 @@ type ExecuteResult struct {
 	Errors    []error
 }
 
+// executeDeps holds unexported seams for testing timing-dependent behavior.
+// Production code always uses the zero value (all fields nil).
+type executeDeps struct {
+	// beforePullCommit is called after the remote file is downloaded to a temp
+	// file but before it is renamed into place. Tests use this to simulate a
+	// concurrent local write between download and commit.
+	beforePullCommit func(localPath string)
+}
+
 // Execute applies the sync plans against local filesystem and remote storage.
 func Execute(
 	plans []types.SyncPlan,
@@ -33,6 +47,18 @@ func Execute(
 	c *client.Client,
 	state *State,
 	dryRun bool,
+) (*ExecuteResult, error) {
+	return execute(plans, localRoot, remotePrefix, c, state, dryRun, executeDeps{})
+}
+
+func execute(
+	plans []types.SyncPlan,
+	localRoot string,
+	remotePrefix string,
+	c *client.Client,
+	state *State,
+	dryRun bool,
+	deps executeDeps,
 ) (*ExecuteResult, error) {
 	result := &ExecuteResult{}
 
@@ -60,7 +86,11 @@ func Execute(
 				result.Pulled++
 				continue
 			}
-			if err := executePull(localPath, remoteKey, plan.Path, c, state); err != nil {
+			if err := executePull(localPath, remoteKey, plan.Path, c, state, deps.beforePullCommit); err != nil {
+				if errors.Is(err, errPullAborted) {
+					result.Conflicts++
+					continue
+				}
 				result.Errors = append(result.Errors, fmt.Errorf("pull %s: %w", plan.Path, err))
 				continue
 			}
@@ -240,14 +270,16 @@ func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c
 	return nil
 }
 
-func executePull(localPath, remoteKey, relPath string, c *client.Client, state *State) error {
+func executePull(localPath, remoteKey, relPath string, c *client.Client, state *State, beforePullCommit func(string)) error {
 	// Safety check: verify local hasn't changed since archive
+	var preHash string
 	if prev, ok := state.Files[relPath]; ok {
 		currentHash, err := hashFile(localPath)
 		if err == nil && currentHash != prev.LocalHash {
 			fmt.Printf("conflict (local changed during pull): %s\n", relPath)
-			return nil
+			return errPullAborted
 		}
+		preHash = currentHash
 	}
 
 	dl, err := c.Download(remoteKey)
@@ -274,6 +306,21 @@ func executePull(localPath, remoteKey, relPath string, c *client.Client, state *
 		return err
 	}
 	f.Close()
+
+	// Allow tests to inject a concurrent local write before commit.
+	if beforePullCommit != nil {
+		beforePullCommit(localPath)
+	}
+
+	// Re-check local hash: abort if the file was modified during download.
+	if preHash != "" {
+		postHash, err := hashFile(localPath)
+		if err == nil && postHash != preHash {
+			os.Remove(tmpPath)
+			fmt.Printf("conflict (local changed during pull): %s\n", relPath)
+			return errPullAborted
+		}
+	}
 
 	if err := os.Rename(tmpPath, localPath); err != nil {
 		os.Remove(tmpPath)
