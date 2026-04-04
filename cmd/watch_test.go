@@ -80,6 +80,10 @@ func TestWatchLoop_PollBehavior(t *testing.T) {
 		{"remote changes trigger sync", true, false, true},
 		{"cursor invalid triggers sync", false, true, true},
 		{"no changes no sync", false, false, false},
+		// Bug fix: self-only batches return hasChanges=true so cursor advances.
+		// watchLoop must call syncFn; runIncrementalSyncInner filters self-changes
+		// and advances cursor even when no real remote work is done.
+		{"self-only batch triggers sync for cursor advancement", true, false, true},
 	}
 
 	for _, tt := range tests {

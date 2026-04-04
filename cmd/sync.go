@@ -177,8 +177,7 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 	// Filter and normalize remote changes
 	var remoteChanges []types.ChangeEntry
 	for _, ch := range resp.Changes {
-		// Self-change filter (pushed_seqs primary, token_id fallback)
-		// TODO: Remove token_id fallback once server returns seq in upload responses (ADR 0033)
+		// Self-change filter: seq-based (primary) + token_id (defense-in-depth)
 		if state.IsPushedSeq(ch.Seq) {
 			continue
 		}

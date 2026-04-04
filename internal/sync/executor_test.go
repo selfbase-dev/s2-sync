@@ -294,6 +294,53 @@ func TestExecute_Conflict_DifferentContent(t *testing.T) {
 	}
 }
 
+// Bug fix: remote 404 during conflict must push local, not silently return nil.
+func TestExecute_Conflict_Remote404_PushesLocal(t *testing.T) {
+	uploadCount := 0
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.WriteHeader(404)
+			return
+		}
+		if r.Method == "PUT" {
+			uploadCount++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "n1", "name": "file.txt", "size": 13,
+				"hash": "abc", "etag": `"1"`, "seq": int64(77),
+			})
+		}
+	})
+
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("local content"), 0644)
+
+	state := &State{Files: map[string]types.FileState{}}
+	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict}}
+
+	result, err := Execute(plans, localDir, "prefix/", c, state, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Conflicts != 1 {
+		t.Errorf("conflicts = %d, want 1", result.Conflicts)
+	}
+	if uploadCount != 1 {
+		t.Errorf("upload count = %d, want 1 (local must be pushed to remote)", uploadCount)
+	}
+	fs, ok := state.Files["file.txt"]
+	if !ok {
+		t.Fatal("file.txt not in state after conflict push")
+	}
+	if fs.ContentVersion != 1 {
+		t.Errorf("content_version = %d, want 1", fs.ContentVersion)
+	}
+	if !state.IsPushedSeq(77) {
+		t.Error("seq 77 should be in pushed_seqs")
+	}
+}
+
 func TestExecute_DryRun(t *testing.T) {
 	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("server should not be called in dry-run mode")

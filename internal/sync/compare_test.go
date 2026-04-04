@@ -101,11 +101,13 @@ func TestCompare_WithArchive(t *testing.T) {
 			want:    map[string]types.SyncAction{"a.txt": types.Conflict},
 		},
 		{
-			name:    "both deleted → no-op",
+			// Bug fix: both deleted must clean archive (DeleteLocal) so that
+			// the next full sync doesn't try to DeleteRemote a file already gone.
+			name:    "both deleted → clean archive (DeleteLocal, not no-op)",
 			local:   map[string]types.LocalFile{},
 			remote:  map[string]types.RemoteFile{},
 			archive: map[string]types.FileState{"a.txt": {LocalHash: "h1", ContentVersion: 1, Size: 10}},
-			want:    map[string]types.SyncAction{},
+			want:    map[string]types.SyncAction{"a.txt": types.DeleteLocal},
 		},
 		{
 			name: "multiple files mixed",
@@ -125,9 +127,11 @@ func TestCompare_WithArchive(t *testing.T) {
 				"deleted.txt":   {LocalHash: "h_del", ContentVersion: 1, Size: 5},
 			},
 			want: map[string]types.SyncAction{
-				"edited.txt":    types.Push,
-				"new.txt":       types.Push,
+				"edited.txt":     types.Push,
+				"new.txt":        types.Push,
 				"remote_new.txt": types.Pull,
+				// Both sides deleted: clean archive to prevent DeleteRemote re-firing
+				"deleted.txt": types.DeleteLocal,
 			},
 		},
 	}
@@ -244,6 +248,15 @@ func TestCompareIncremental(t *testing.T) {
 			archive: map[string]types.FileState{},
 			changes: []types.ChangeEntry{{Action: "put", PathAfter: "newdir", IsDir: true}},
 			want:    map[string]types.SyncAction{},
+		},
+		// Bug fix: both deleted must emit DeleteLocal to clean archive entry;
+		// previously NoOp left archive intact causing DeleteRemote on next sync.
+		{
+			name:    "both deleted → clean archive (DeleteLocal, not NoOp)",
+			local:   map[string]types.LocalFile{},
+			archive: map[string]types.FileState{"gone.txt": {LocalHash: "h1"}},
+			changes: []types.ChangeEntry{{Action: "delete", PathBefore: "gone.txt"}},
+			want:    map[string]types.SyncAction{"gone.txt": types.DeleteLocal},
 		},
 	}
 

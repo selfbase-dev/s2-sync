@@ -152,9 +152,10 @@ func CompareIncremental(
 		case !localChanged && !localNew && !localDeleted && remoteDeleted:
 			action = types.DeleteLocal
 
-		// Both deleted
+		// Both deleted — must clean archive entry to prevent DeleteRemote re-firing.
+		// DeleteLocal handler tolerates IsNotExist so this is safe when file is gone.
 		case localDeleted && remoteDeleted:
-			action = types.NoOp
+			action = types.DeleteLocal
 
 		default:
 			action = types.NoOp
@@ -203,7 +204,8 @@ func classify(
 	case localChanged && remoteDeleted:
 		return types.Conflict
 	case localDeleted && remoteDeleted:
-		return types.NoOp
+		// Clean archive entry; DeleteLocal handler tolerates IsNotExist.
+		return types.DeleteLocal
 	default:
 		return types.NoOp
 	}

@@ -241,7 +241,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 			hasRemoteChanges = true
 			break
 		}
-		return hasRemoteChanges, false, nil
+		// Always trigger doSync when there are any changes (including self-only
+		// batches) so runIncrementalSyncInner can advance the cursor. Without this,
+		// a batch of only self-changes is never consumed and the cursor stalls.
+		hasCursorWork := len(resp.Changes) > 0
+		return hasRemoteChanges || hasCursorWork, false, nil
 	}
 
 	// Build sync function

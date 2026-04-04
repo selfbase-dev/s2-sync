@@ -634,6 +634,9 @@ func (c *Client) LatestCursor() (string, error) {
 	}
 	defer resp.Body.Close()
 
+	if err := checkStatus(resp); err != nil {
+		return "", err
+	}
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("latest cursor failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
