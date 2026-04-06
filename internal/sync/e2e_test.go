@@ -587,7 +587,7 @@ func TestS18_Incremental_OtherDevicePush(t *testing.T) {
 	env := newTestEnv(t)
 
 	// Create a child token with the same base_path to simulate a second device.
-	// (SEL-240: create returns raw_token directly)
+	// (SELF-240: create returns raw_token directly)
 	childResp, err := env.client.CreateToken("s18-device2", env.basePath, false, nil)
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
