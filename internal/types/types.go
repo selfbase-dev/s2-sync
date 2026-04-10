@@ -150,9 +150,8 @@ type ChangeEntry struct {
 
 // ChangesResponse from GET /api/changes.
 type ChangesResponse struct {
-	Changes        []ChangeEntry `json:"changes"`
-	NextCursor     string        `json:"next_cursor"`
-	ResyncRequired bool          `json:"resync_required"`
+	Changes    []ChangeEntry `json:"changes"`
+	NextCursor string        `json:"next_cursor"`
 }
 
 // LatestCursorResponse from GET /api/changes/latest.

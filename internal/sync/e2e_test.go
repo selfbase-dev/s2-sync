@@ -265,10 +265,6 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	if err != nil {
 		e.t.Fatalf("PollChanges: %v", err)
 	}
-	if resp.ResyncRequired {
-		state.Cursor = ""
-		return e.initialSync(state)
-	}
 
 	// Filter self-changes (disabled when skipSelfFilter is set,
 	// since test uses same token for both local sync and remote changes).
@@ -286,11 +282,19 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 		remoteChanges = append(remoteChanges, ch)
 	}
 
-	plans := CompareIncremental(localFiles, state.Files, remoteChanges)
+	// ADR 0038: expand is_dir events into file-level events.
+	fileChanges, dirOps, err := ExpandDirEvents(remoteChanges, state.Files, e.client, "")
+	if err != nil {
+		e.t.Fatalf("ExpandDirEvents: %v", err)
+	}
+
+	plans := CompareIncremental(localFiles, state.Files, fileChanges)
 	result, err := Execute(plans, e.localDir, "", e.client, state, false)
 	if err != nil {
 		e.t.Fatalf("Execute: %v", err)
 	}
+
+	ApplyDirSideEffects(io.Discard, e.localDir, dirOps)
 
 	if resp.NextCursor != "" {
 		state.Cursor = resp.NextCursor
@@ -621,10 +625,8 @@ func TestS21_CursorGone_FullResync(t *testing.T) {
 	t.Skip("TODO: requires cursor expiration on server (7 day wait or DB manipulation)")
 }
 
-func TestS22_ResyncRequired(t *testing.T) {
-	markScenario("S22")
-	t.Skip("TODO: requires scope ancestor move to trigger resync_required")
-}
+// Obsoleted by ADR 0038: resync_required was abolished in favor of
+// per-access-path ancestor event transformation. See TestScoped_S22_*.
 
 // --- Chunked upload ---
 
@@ -821,19 +823,19 @@ func TestScoped_CrossToken(t *testing.T) {
 	})
 }
 
-// --- S22: resync_required via scope ancestor move ---
+// --- S22: ADR 0038 ancestor event transformation ---
 
-// TestScoped_S22_ResyncRequired_AncestorMove: moving an ancestor directory of
-// the token's scope triggers resync_required in the changes feed.
+// TestScoped_S22_AncestorMove_DeletesScope: moving an ancestor directory of
+// the token's scope results in a `delete /` event (is_dir=true), signalling
+// that the client's entire view has disappeared.
 //
-// Setup: dynamically create a 2-level nested token (base_path="/s22-outer-{ts}/inner/")
-// using root token delegation. Then move the outer directory.
-// isAncestorOfScope fires because "s22-outer-{ts}" is an ancestor of "s22-outer-{ts}/inner".
-func TestScoped_S22_ResyncRequired_AncestorMove(t *testing.T) {
+// Setup: create a 2-level nested token (base_path="{parent}/s22-outer-{ts}/inner/")
+// via root delegation. Parent moves the outer directory. With ADR 0038 the
+// nested token's changes feed emits a delete entry with path_before="/" and
+// is_dir=true (not the obsolete resync_required flag).
+func TestScoped_S22_AncestorMove_DeletesScope(t *testing.T) {
 	pc, parentBase := parentClient(t)
 
-	// Create nested token under the parent's scope:
-	// base_path = "{parentBase}s22-outer-{ts}/inner/"
 	outerDir := "s22-outer-" + time.Now().Format("150405")
 	innerPath := outerDir + "/inner/"
 	nestedBasePath := parentBase + innerPath
@@ -866,13 +868,20 @@ func TestScoped_S22_ResyncRequired_AncestorMove(t *testing.T) {
 		t.Skipf("move not supported: %v", err)
 	}
 
-	// Poll changes with nested token — should get resync_required
+	// Poll changes with nested token — expect a delete / (is_dir=true) entry
 	resp, err := nestedClient.PollChanges(cursor)
 	if err != nil {
 		t.Fatalf("PollChanges: %v", err)
 	}
-	if !resp.ResyncRequired {
-		t.Errorf("resync_required should be true after ancestor directory %q was moved", outerDir)
+	var found bool
+	for _, ch := range resp.Changes {
+		if ch.Action == "delete" && ch.IsDir && ch.PathBefore == "/" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected delete / (is_dir) after ancestor move; got %+v", resp.Changes)
 	}
 }
 

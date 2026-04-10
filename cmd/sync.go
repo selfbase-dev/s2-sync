@@ -164,12 +164,6 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 		return fmt.Errorf("poll changes failed: %w", err)
 	}
 
-	if resp.ResyncRequired {
-		fmt.Fprintln(cmd.OutOrStdout(), "Resync required, falling back to full sync...")
-		state.Cursor = ""
-		return runInitialSync(cmd, localDir, remotePrefix, c, state)
-	}
-
 	// Filter remote changes (server already returns base_path-relative client paths)
 	var remoteChanges []types.ChangeEntry
 	for _, ch := range resp.Changes {
@@ -183,8 +177,17 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 		remoteChanges = append(remoteChanges, ch)
 	}
 
+	// ADR 0038: expand is_dir events into file-level events. Non-is_dir
+	// events pass through unchanged; directory-level operations (mkdir,
+	// dir delete) are collected in order so ApplyDirSideEffects can
+	// apply them after the file plans run without losing event ordering.
+	fileChanges, dirOps, err := s2sync.ExpandDirEvents(remoteChanges, state.Files, c, remotePrefix)
+	if err != nil {
+		return fmt.Errorf("expand dir events failed: %w", err)
+	}
+
 	// Incremental three-way compare
-	plans := s2sync.CompareIncremental(localFiles, state.Files, remoteChanges)
+	plans := s2sync.CompareIncremental(localFiles, state.Files, fileChanges)
 
 	hasLocalChanges := false
 	for path, l := range localFiles {
@@ -212,6 +215,13 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 		if err != nil {
 			return err
 		}
+	}
+
+	// ADR 0038: apply directory-level side effects (mkdir / empty-dir
+	// cleanup) in event order. Best effort — failures here shouldn't
+	// block cursor advancement.
+	if !dryRun {
+		s2sync.ApplyDirSideEffects(cmd.OutOrStdout(), localDir, dirOps)
 	}
 
 	// Only advance cursor if all operations succeeded.

@@ -242,13 +242,6 @@ func TestCompareIncremental(t *testing.T) {
 			changes: []types.ChangeEntry{{Action: "put", PathAfter: "foo.txt"}},
 			want:    map[string]types.SyncAction{"foo.txt": types.Conflict},
 		},
-		{
-			name:    "mkdir event is ignored (directories not synced as files)",
-			local:   map[string]types.LocalFile{},
-			archive: map[string]types.FileState{},
-			changes: []types.ChangeEntry{{Action: "put", PathAfter: "newdir", IsDir: true}},
-			want:    map[string]types.SyncAction{},
-		},
 		// Bug fix: both deleted must emit DeleteLocal to clean archive entry;
 		// previously NoOp left archive intact causing DeleteRemote on next sync.
 		{

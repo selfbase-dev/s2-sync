@@ -503,30 +503,6 @@ func TestPollChanges_Success(t *testing.T) {
 	if resp.NextCursor != "cursor_def" {
 		t.Errorf("next_cursor = %q", resp.NextCursor)
 	}
-	if resp.ResyncRequired {
-		t.Error("resync_required should be false")
-	}
-}
-
-func TestPollChanges_ResyncRequired(t *testing.T) {
-	srv := newTestServer(t, map[string]http.HandlerFunc{
-		"GET /api/changes": func(w http.ResponseWriter, r *http.Request) {
-			jsonResponse(w, 200, map[string]any{
-				"changes":         []any{},
-				"next_cursor":     "cursor_new",
-				"resync_required": true,
-			})
-		},
-	})
-
-	c := New(srv.URL, "s2_test")
-	resp, err := c.PollChanges("cursor_old")
-	if err != nil {
-		t.Fatalf("PollChanges() error: %v", err)
-	}
-	if !resp.ResyncRequired {
-		t.Error("resync_required should be true")
-	}
 }
 
 func TestPollChanges_CursorGone(t *testing.T) {

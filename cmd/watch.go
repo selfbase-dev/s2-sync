@@ -221,9 +221,6 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return false, false, err
 		}
-		if resp.ResyncRequired {
-			return false, true, nil
-		}
 		// Filter self-changes (same logic as sync.go)
 		hasRemoteChanges := false
 		for _, ch := range resp.Changes {
@@ -348,10 +345,6 @@ func runIncrementalSyncInner(cmd *cobra.Command, localDir, remotePrefix string, 
 	if err != nil {
 		return fmt.Errorf("poll changes failed: %w", err)
 	}
-	if resp.ResyncRequired {
-		state.Cursor = ""
-		return runInitialSyncInner(cmd, localDir, remotePrefix, c, state)
-	}
 
 	// Filter remote changes (server already returns base_path-relative client paths)
 	var remoteChanges []types.ChangeEntry
@@ -365,7 +358,13 @@ func runIncrementalSyncInner(cmd *cobra.Command, localDir, remotePrefix string, 
 		remoteChanges = append(remoteChanges, ch)
 	}
 
-	plans := s2sync.CompareIncremental(localFiles, state.Files, remoteChanges)
+	// ADR 0038: expand is_dir events into file-level events.
+	fileChanges, dirOps, err := s2sync.ExpandDirEvents(remoteChanges, state.Files, c, remotePrefix)
+	if err != nil {
+		return fmt.Errorf("expand dir events failed: %w", err)
+	}
+
+	plans := s2sync.CompareIncremental(localFiles, state.Files, fileChanges)
 
 	var hasErrors bool
 	if len(plans) > 0 {
@@ -389,6 +388,9 @@ func runIncrementalSyncInner(cmd *cobra.Command, localDir, remotePrefix string, 
 			}
 		}
 	}
+
+	// ADR 0038: apply dir side effects (empty dir creation, empty dir cleanup) in event order.
+	s2sync.ApplyDirSideEffects(cmd.OutOrStdout(), localDir, dirOps)
 
 	// Only advance cursor if no errors — failed changes need to be retried
 	if !hasErrors {

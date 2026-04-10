@@ -65,17 +65,15 @@ func CompareIncremental(
 	}
 
 	// Build set of remotely changed paths and their actions.
-	// Skip directory events (mkdir) — we only sync files; directories are
-	// created implicitly when pulling files into them.
+	// ADR 0038: is_dir events are expanded into file-level events by
+	// ExpandDirEvents before reaching this function, so we no longer
+	// skip them here.
 	// normPath strips the leading "/" that the server's absolutePathToClient adds
 	// so change paths match the slash-free keys used by Walk and ListAllRecursive.
 	normPath := func(p string) string { return strings.TrimPrefix(p, "/") }
 
 	remoteChanged := make(map[string]types.ChangeEntry)
 	for _, ch := range remoteChanges {
-		if ch.IsDir {
-			continue // skip directory events
-		}
 		switch ch.Action {
 		case "put":
 			if ch.PathAfter != "" {
