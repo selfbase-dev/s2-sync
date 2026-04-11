@@ -86,7 +86,7 @@ func execute(
 				result.Pulled++
 				continue
 			}
-			if err := executePull(localPath, remoteKey, plan.Path, c, state, deps.beforePullCommit); err != nil {
+			if err := executePull(localPath, remoteKey, plan.Path, plan.RevisionID, c, state, deps.beforePullCommit); err != nil {
 				if errors.Is(err, errPullAborted) {
 					result.Conflicts++
 					continue
@@ -135,7 +135,7 @@ func execute(
 				result.Conflicts++
 				continue
 			}
-			if err := executeConflict(localPath, remoteKey, plan.Path, localRoot, c, state); err != nil {
+			if err := executeConflict(localPath, remoteKey, plan.Path, plan.RevisionID, localRoot, c, state); err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("conflict %s: %w", plan.Path, err))
 				continue
 			}
@@ -270,7 +270,7 @@ func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c
 	return nil
 }
 
-func executePull(localPath, remoteKey, relPath string, c *client.Client, state *State, beforePullCommit func(string)) error {
+func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Client, state *State, beforePullCommit func(string)) error {
 	// Safety check: verify local hasn't changed since archive
 	var preHash string
 	if prev, ok := state.Files[relPath]; ok {
@@ -282,7 +282,18 @@ func executePull(localPath, remoteKey, relPath string, c *client.Client, state *
 		preHash = currentHash
 	}
 
-	dl, err := c.Download(remoteKey)
+	// Prefer the race-free revision-pinned fetch when a revision id is
+	// available (ADR 0040 §2段階fetchflow). Fall back to path-based
+	// download for legacy callers that don't carry one.
+	var (
+		dl  *client.DownloadResult
+		err error
+	)
+	if revisionID != "" {
+		dl, err = c.DownloadRevision(revisionID)
+	} else {
+		dl, err = c.Download(remoteKey)
+	}
 	if err != nil {
 		return err
 	}
@@ -352,9 +363,18 @@ func executePull(localPath, remoteKey, relPath string, c *client.Client, state *
 // Special case: on initial sync (no archive), both sides exist but we don't
 // know if they're identical. We download remote, compare hashes, and if
 // identical treat as no-op (just record state).
-func executeConflict(localPath, remoteKey, relPath, localRoot string, c *client.Client, state *State) error {
-	// Download remote version
-	dl, err := c.Download(remoteKey)
+func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string, c *client.Client, state *State) error {
+	// Download remote version. Prefer revision-pinned fetch for race-free
+	// conflict resolution when we have the id (ADR 0040 §2段階fetchflow).
+	var (
+		dl  *client.DownloadResult
+		err error
+	)
+	if revisionID != "" {
+		dl, err = c.DownloadRevision(revisionID)
+	} else {
+		dl, err = c.Download(remoteKey)
+	}
 	if err != nil {
 		if err == client.ErrNotFound {
 			// Remote was deleted; push local to resolve conflict (local wins).

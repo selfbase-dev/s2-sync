@@ -15,12 +15,21 @@ type LocalFile struct {
 	ModTime int64 // unix timestamp
 }
 
-// RemoteFile represents a file from remote listing.
+// RemoteFile represents a file from remote listing or a snapshot item.
+//
+// Hash / RevisionID / ContentVersion are populated from /api/snapshot
+// (ADR 0039) — they let the CLI compare without downloading and issue
+// race-free content fetches via /api/revisions/{id} (ADR 0040
+// §2段階fetchflow). They are zero values for legacy ListDir callers.
 type RemoteFile struct {
 	Name       string
 	Size       int64
 	ModifiedAt string
 	IsDir      bool
+
+	Hash           string
+	RevisionID     string
+	ContentVersion int64
 }
 
 // SyncAction represents what to do with a file during sync.
@@ -55,9 +64,15 @@ func (a SyncAction) String() string {
 }
 
 // SyncPlan represents the classified action for a single file path.
+//
+// `RevisionID` is populated when Compare / CompareIncremental knows the
+// exact revision to fetch — for Pull / Conflict plans this enables the
+// race-free /api/revisions/:id fetch path (ADR 0040 §2段階fetchflow).
+// Empty for Push / Delete plans or when the source doesn't carry it.
 type SyncPlan struct {
-	Path   string
-	Action SyncAction
+	Path       string
+	Action     SyncAction
+	RevisionID string
 }
 
 // --- API request types ---
@@ -136,9 +151,9 @@ type DeleteResult struct {
 // ChangeEntry from GET /api/changes.
 type ChangeEntry struct {
 	Seq            int64  `json:"seq"`
-	TokenID        string `json:"token_id"`         // needs ADR 0033
-	ContentVersion *int64 `json:"content_version"`  // needs ADR 0033
-	Action         string `json:"action"`           // put, mkdir, delete, move
+	TokenID        string `json:"token_id"`        // needs ADR 0033
+	ContentVersion *int64 `json:"content_version"` // needs ADR 0033
+	Action         string `json:"action"`          // put, mkdir, delete, move
 	PathBefore     string `json:"path_before"`
 	PathAfter      string `json:"path_after"`
 	IsDir          bool   `json:"is_dir"`
@@ -149,10 +164,40 @@ type ChangeEntry struct {
 }
 
 // ChangesResponse from GET /api/changes.
+//
+// ADR 0038 decision 4 removed `resync_required` from the server (SELF-287
+// merged, SELF-290 shipped the snapshot primitive that replaces the full-
+// resync escape hatch). Clients now recover from scope-wide events via
+// the hybrid strategy in ADR 0040 (archive walk + /api/snapshot fetch).
 type ChangesResponse struct {
-	Changes        []ChangeEntry `json:"changes"`
-	NextCursor     string        `json:"next_cursor"`
-	ResyncRequired bool          `json:"resync_required"`
+	Changes    []ChangeEntry `json:"changes"`
+	NextCursor string        `json:"next_cursor"`
+}
+
+// --- Snapshot primitive (ADR 0039) ---
+
+// SnapshotItem is one metadata entry returned by GET /api/snapshot.
+// Per ADR 0039 §API endpoint: directories end with "/" in `Path`, files
+// do not. `Type` is "file" or "dir".
+type SnapshotItem struct {
+	Path           string `json:"path"`
+	Type           string `json:"type"`
+	ContentVersion int64  `json:"content_version"`
+	RevisionID     string `json:"revision_id"`
+	Size           *int64 `json:"size"`
+	Hash           string `json:"hash"`
+	ContentType    string `json:"content_type"`
+}
+
+// SnapshotResponse from GET /api/snapshot[?path=X].
+//
+// `Cursor` is the atomic changelog position paired with `Items` (ADR 0039
+// §Atomicity). The CLI uses it as the primary cursor on bootstrap and
+// 410 recovery, and as a hint during mid-incremental subtree fetches
+// (ADR 0040 §cursor semantics).
+type SnapshotResponse struct {
+	Items  []SnapshotItem `json:"items"`
+	Cursor string         `json:"cursor"`
 }
 
 // LatestCursorResponse from GET /api/changes/latest.

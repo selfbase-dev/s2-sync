@@ -37,12 +37,21 @@ func Compare(
 
 	for path := range paths {
 		l, hasLocal := local[path]
-		_, hasRemote := remote[path]
+		r, hasRemote := remote[path]
 		a, hasArchive := archive[path]
 
 		action := classify(l, hasLocal, hasRemote, a, hasArchive)
 		if action != types.NoOp {
-			plans = append(plans, types.SyncPlan{Path: path, Action: action})
+			// Populate RevisionID so executor.executePull can use the
+			// race-free /api/revisions/:id fetch path when it is available.
+			// Only the snapshot-backed caller sets RemoteFile.RevisionID;
+			// the legacy ListAllRecursive path leaves it empty and the
+			// executor falls back to /api/files/:path.
+			plans = append(plans, types.SyncPlan{
+				Path:       path,
+				Action:     action,
+				RevisionID: r.RevisionID,
+			})
 		}
 	}
 
@@ -73,8 +82,12 @@ func CompareIncremental(
 
 	remoteChanged := make(map[string]types.ChangeEntry)
 	for _, ch := range remoteChanges {
+		// Callers are expected to pre-split dir events out and route
+		// them through HandleIncrementalDirEvents (ADR 0040 hybrid
+		// strategy). Any is_dir entry that slips through here is
+		// dropped so CompareIncremental stays file-level.
 		if ch.IsDir {
-			continue // skip directory events
+			continue
 		}
 		switch ch.Action {
 		case "put":
@@ -167,7 +180,15 @@ func CompareIncremental(
 		}
 
 		if action != types.NoOp {
-			plans = append(plans, types.SyncPlan{Path: path, Action: action})
+			// For Pull / Conflict plans, thread the revision id from the
+			// change entry so the executor can fetch it race-free. delete /
+			// move events don't carry a new revision id and we leave it
+			// empty — the executor won't use it for those actions.
+			plans = append(plans, types.SyncPlan{
+				Path:       path,
+				Action:     action,
+				RevisionID: rch.RevisionID,
+			})
 		}
 	}
 

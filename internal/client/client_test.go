@@ -503,30 +503,6 @@ func TestPollChanges_Success(t *testing.T) {
 	if resp.NextCursor != "cursor_def" {
 		t.Errorf("next_cursor = %q", resp.NextCursor)
 	}
-	if resp.ResyncRequired {
-		t.Error("resync_required should be false")
-	}
-}
-
-func TestPollChanges_ResyncRequired(t *testing.T) {
-	srv := newTestServer(t, map[string]http.HandlerFunc{
-		"GET /api/changes": func(w http.ResponseWriter, r *http.Request) {
-			jsonResponse(w, 200, map[string]any{
-				"changes":         []any{},
-				"next_cursor":     "cursor_new",
-				"resync_required": true,
-			})
-		},
-	})
-
-	c := New(srv.URL, "s2_test")
-	resp, err := c.PollChanges("cursor_old")
-	if err != nil {
-		t.Fatalf("PollChanges() error: %v", err)
-	}
-	if !resp.ResyncRequired {
-		t.Error("resync_required should be true")
-	}
 }
 
 func TestPollChanges_CursorGone(t *testing.T) {
@@ -770,3 +746,168 @@ func TestMove_Success(t *testing.T) {
 		t.Fatalf("Move() error: %v", err)
 	}
 }
+
+// --- /api/snapshot (ADR 0039) ---
+
+func TestSnapshot_ScopeRoot(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/snapshot": func(w http.ResponseWriter, r *http.Request) {
+			requireAuth(t, r, "s2_test")
+			if r.URL.RawQuery != "" {
+				t.Errorf("expected empty query, got %q", r.URL.RawQuery)
+			}
+			jsonResponse(w, 200, map[string]any{
+				"items": []any{
+					map[string]any{
+						"path":            "/docs/",
+						"type":            "dir",
+						"content_version": 0,
+						"revision_id":     nil,
+						"size":            nil,
+						"hash":            nil,
+						"content_type":    "inode/directory",
+					},
+					map[string]any{
+						"path":            "/docs/a.txt",
+						"type":            "file",
+						"content_version": 1,
+						"revision_id":     "rev_01",
+						"size":            11,
+						"hash":            "h-a",
+						"content_type":    "text/plain",
+					},
+				},
+				"cursor": "cursor_abc",
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	resp, err := c.Snapshot("")
+	if err != nil {
+		t.Fatalf("Snapshot() error: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("got %d items, want 2", len(resp.Items))
+	}
+	if resp.Cursor != "cursor_abc" {
+		t.Errorf("cursor = %q", resp.Cursor)
+	}
+	if resp.Items[1].Type != "file" || resp.Items[1].RevisionID != "rev_01" {
+		t.Errorf("unexpected item[1]: %+v", resp.Items[1])
+	}
+	if resp.Items[1].Size == nil || *resp.Items[1].Size != 11 {
+		t.Errorf("size = %v, want 11", resp.Items[1].Size)
+	}
+}
+
+func TestSnapshot_WithPath(t *testing.T) {
+	var capturedQuery string
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/snapshot": func(w http.ResponseWriter, r *http.Request) {
+			capturedQuery = r.URL.RawQuery
+			jsonResponse(w, 200, map[string]any{
+				"items":  []any{},
+				"cursor": "cursor_sub",
+			})
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	if _, err := c.Snapshot("/vacation/2024"); err != nil {
+		t.Fatalf("Snapshot() error: %v", err)
+	}
+	if want := "path=%2Fvacation%2F2024"; capturedQuery != want {
+		t.Errorf("query = %q, want %q", capturedQuery, want)
+	}
+}
+
+func TestSnapshot_NotFound(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/snapshot": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) },
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.Snapshot("/missing")
+	if err != ErrNotFound {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSnapshot_SubtreeCapExceeded(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/snapshot": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(413)
+			w.Write([]byte(`{"error":{"code":"subtree_cap_exceeded","message":"too big"}}`))
+		},
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.Snapshot("/huge")
+	if err != ErrSubtreeCapExceeded {
+		t.Errorf("error = %v, want ErrSubtreeCapExceeded", err)
+	}
+}
+
+func TestSnapshot_Unauthorized(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/snapshot": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) },
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.Snapshot("")
+	if err != ErrUnauthorized {
+		t.Errorf("error = %v, want ErrUnauthorized", err)
+	}
+}
+
+// --- /api/revisions/:id (GET, ADR 0040) ---
+
+func TestDownloadRevision_Success(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/revisions/": func(w http.ResponseWriter, r *http.Request) {
+			requireAuth(t, r, "s2_test")
+			if r.URL.Path != "/api/revisions/rev_42" {
+				t.Errorf("path = %q", r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("ETag", `"7"`)
+			w.Header().Set("Content-Length", "5")
+			w.WriteHeader(200)
+			w.Write([]byte("hello"))
+		},
+	})
+
+	c := New(srv.URL, "s2_test")
+	dl, err := c.DownloadRevision("rev_42")
+	if err != nil {
+		t.Fatalf("DownloadRevision() error: %v", err)
+	}
+	defer dl.Body.Close()
+	data, _ := io.ReadAll(dl.Body)
+	if string(data) != "hello" {
+		t.Errorf("body = %q, want %q", data, "hello")
+	}
+	if dl.ContentVersion != 7 {
+		t.Errorf("content_version = %d, want 7", dl.ContentVersion)
+	}
+	if dl.ContentType != "text/plain" {
+		t.Errorf("content_type = %q", dl.ContentType)
+	}
+	if dl.Size != 5 {
+		t.Errorf("size = %d, want 5", dl.Size)
+	}
+}
+
+func TestDownloadRevision_NotFound(t *testing.T) {
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"GET /api/revisions/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) },
+	})
+	c := New(srv.URL, "s2_test")
+	_, err := c.DownloadRevision("rev_missing")
+	if err != ErrNotFound {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// Ensure the unused types import keeps the compiler happy if new tests
+// reference no types.* symbols directly.
+var _ = types.SnapshotItem{}

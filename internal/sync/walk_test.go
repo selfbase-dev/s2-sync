@@ -54,9 +54,9 @@ func TestWalk_SkipsS2Dir(t *testing.T) {
 func TestWalk_ExcludeFunction(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
-	writeFile(t, filepath.Join(dir, ".DS_Store"), "mac")       // not excluded by default anymore
+	writeFile(t, filepath.Join(dir, ".DS_Store"), "mac")          // not excluded by default anymore
 	writeFile(t, filepath.Join(dir, "._hidden"), "resource fork") // excluded: matches ._*
-	writeFile(t, filepath.Join(dir, ".git", "config"), "git")  // not excluded by default anymore
+	writeFile(t, filepath.Join(dir, ".git", "config"), "git")     // not excluded by default anymore
 
 	exclude := DefaultExclude()
 	files, err := Walk(dir, nil, exclude)

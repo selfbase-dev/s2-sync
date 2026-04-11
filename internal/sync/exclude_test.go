@@ -13,11 +13,11 @@ func TestDefaultExclude(t *testing.T) {
 	// Only built-in defaults: macOS metadata and hard excludes
 	shouldExclude := []string{
 		"desktop.ini",
-		"._document.pdf",                            // macOS resource fork
-		"._.DS_Store",                               // macOS
-		".s2",                                       // hard exclude
-		".s2/state.json",                            // hard exclude
-		"file.sync-conflict-20260101-120000.txt",    // hard exclude
+		"._document.pdf",                         // macOS resource fork
+		"._.DS_Store",                            // macOS
+		".s2",                                    // hard exclude
+		".s2/state.json",                         // hard exclude
+		"file.sync-conflict-20260101-120000.txt", // hard exclude
 	}
 
 	for _, path := range shouldExclude {
@@ -36,9 +36,9 @@ func TestDefaultExclude(t *testing.T) {
 		".git/config",
 		"node_modules",
 		"node_modules/pkg/index.js",
-		".DS_Store",  // only excluded via .s2ignore
-		"Thumbs.db",  // only excluded via .s2ignore
-		"file.swp",   // only excluded via .s2ignore
+		".DS_Store", // only excluded via .s2ignore
+		"Thumbs.db", // only excluded via .s2ignore
+		"file.swp",  // only excluded via .s2ignore
 	}
 
 	for _, path := range shouldNotExclude {

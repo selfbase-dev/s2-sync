@@ -117,8 +117,8 @@ func TestCompare_WithArchive(t *testing.T) {
 				"new.txt":       {Hash: "h3", Size: 30},
 			},
 			remote: map[string]types.RemoteFile{
-				"unchanged.txt": {Size: 10},
-				"edited.txt":    {Size: 10},
+				"unchanged.txt":  {Size: 10},
+				"edited.txt":     {Size: 10},
 				"remote_new.txt": {Size: 40},
 			},
 			archive: map[string]types.FileState{

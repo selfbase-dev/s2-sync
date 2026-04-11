@@ -87,7 +87,6 @@ func runInitialSync(cmd *cobra.Command, localDir, remotePrefix string, c *client
 	fmt.Fprintln(cmd.OutOrStdout(), "Running initial sync...")
 
 	// Clear archive: initial sync must compare fresh, not rely on stale archive.
-	// This ensures remote edits are detected even when cursor was lost.
 	state.Files = make(map[string]types.FileState)
 
 	// Walk local
@@ -97,17 +96,26 @@ func runInitialSync(cmd *cobra.Command, localDir, remotePrefix string, c *client
 		return fmt.Errorf("local scan failed: %w", err)
 	}
 
-	// List remote recursively
-	fmt.Fprintln(cmd.OutOrStdout(), "Listing remote files...")
-	remoteFiles, err := c.ListAllRecursive(remotePrefix)
+	// Atomic scope-root snapshot (ADR 0039 / ADR 0040 §hybrid 戦略).
+	// Returns metadata + an atomic cursor in one request — replaces the
+	// old "ListAllRecursive then LatestCursor" pair which had a race
+	// window between the listing and the cursor.
+	fmt.Fprintln(cmd.OutOrStdout(), "Fetching remote snapshot...")
+	remoteFiles, snapshotCursor, err := s2sync.FetchSnapshotAsRemoteFiles(c, "")
 	if err != nil {
-		return fmt.Errorf("remote list failed: %w", err)
+		return fmt.Errorf("remote snapshot failed: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Local: %d files, Remote: %d files\n",
-		len(localFiles), len(remoteFiles))
+	// Idempotent apply: pre-populate the archive for files whose local
+	// hash already matches the snapshot hash. Compare then short-circuits
+	// to NoOp for those paths instead of routing them through Conflict
+	// and forcing an unnecessary download round-trip (ADR 0040 §conflict
+	// 検出).
+	prefilled := s2sync.PrefillArchiveForIdempotentApply(state.Files, localFiles, remoteFiles)
 
-	// Three-way compare (no archive for initial sync)
+	fmt.Fprintf(cmd.OutOrStdout(), "Local: %d files, Remote: %d files (%d already in sync)\n",
+		len(localFiles), len(remoteFiles), prefilled)
+
 	plans := s2sync.Compare(localFiles, remoteFiles, state.Files)
 
 	var execResult *s2sync.ExecuteResult
@@ -121,19 +129,15 @@ func runInitialSync(cmd *cobra.Command, localDir, remotePrefix string, c *client
 		}
 	}
 
-	// Get cursor AFTER sync completes (not before — avoids double-applying changes).
-	// Only set cursor if all operations succeeded; otherwise retry next time.
+	// Only adopt the snapshot cursor if all operations succeeded. Partial
+	// failures would leave the client thinking it is at a sync boundary
+	// it has not actually reached, causing the next incremental poll to
+	// miss the retried files.
 	hasErrors := execResult != nil && len(execResult.Errors) > 0
-	if !hasErrors {
-		cursor, err := c.LatestCursor()
-		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to get cursor: %v\n", err)
-		} else {
-			state.Cursor = cursor
-		}
+	if !hasErrors && snapshotCursor != "" {
+		state.Cursor = snapshotCursor
 	}
 
-	// Save state
 	if !dryRun {
 		if err := s2sync.SaveState(localDir, state); err != nil {
 			return fmt.Errorf("failed to save state: %w", err)
@@ -164,11 +168,10 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 		return fmt.Errorf("poll changes failed: %w", err)
 	}
 
-	if resp.ResyncRequired {
-		fmt.Fprintln(cmd.OutOrStdout(), "Resync required, falling back to full sync...")
-		state.Cursor = ""
-		return runInitialSync(cmd, localDir, remotePrefix, c, state)
-	}
+	// ADR 0038 decision 4 removed `resync_required`. Scope-wide events
+	// (ancestor move / base_path delete etc.) now arrive as explicit
+	// `delete /` / `put /` entries and are handled by the hybrid
+	// strategy below (ADR 0040 §操作×スコープマトリクス).
 
 	// Filter remote changes (server already returns base_path-relative client paths)
 	var remoteChanges []types.ChangeEntry
@@ -183,8 +186,41 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 		remoteChanges = append(remoteChanges, ch)
 	}
 
-	// Incremental three-way compare
-	plans := s2sync.CompareIncremental(localFiles, state.Files, remoteChanges)
+	// Split dir events (hybrid strategy) from file events (existing pipeline)
+	var dirChanges, fileChanges []types.ChangeEntry
+	for _, ch := range remoteChanges {
+		if ch.IsDir {
+			dirChanges = append(dirChanges, ch)
+		} else {
+			fileChanges = append(fileChanges, ch)
+		}
+	}
+
+	// Apply the hybrid strategy to dir events: archive walk for
+	// deletes / scope-internal moves, /api/snapshot for put dirs, and
+	// os.MkdirAll for mkdir. May mutate state.Files and the local
+	// tree, and may return a new primary cursor when a scope-root
+	// snapshot is performed.
+	dirOutcome, err := s2sync.HandleIncrementalDirEvents(
+		c, localDir, localFiles, state.Files, dirChanges,
+	)
+	if err != nil {
+		return fmt.Errorf("dir event handling: %w", err)
+	}
+	if dirOutcome.LocalChanged {
+		// Re-walk after mkdir / rename side effects.
+		localFiles, err = s2sync.Walk(localDir, state.Files, exclude)
+		if err != nil {
+			return fmt.Errorf("local re-scan failed: %w", err)
+		}
+	}
+
+	// Incremental three-way compare for the file-level events, then
+	// merge with dir-event-derived plans. Dir-event plans win the
+	// dedup tiebreak — they come from a fresh snapshot and should
+	// override stale file-event decisions for the same path.
+	fileLevelPlans := s2sync.CompareIncremental(localFiles, state.Files, fileChanges)
+	plans := s2sync.MergePlansByPath(fileLevelPlans, dirOutcome.ExtraPlans)
 
 	hasLocalChanges := false
 	for path, l := range localFiles {
@@ -214,11 +250,17 @@ func runIncrementalSync(cmd *cobra.Command, localDir, remotePrefix string, c *cl
 		}
 	}
 
-	// Only advance cursor if all operations succeeded.
-	// If some failed, keep old cursor so those changes are retried next time.
+	// Only advance cursor if all operations succeeded. ADR 0040 §cursor
+	// semantics: a scope-root snapshot (from `put /` / ancestor enter
+	// events) REPLACES the primary cursor wholesale instead of
+	// advancing incrementally, effectively re-bootstrapping.
 	hasErrors := execResult != nil && len(execResult.Errors) > 0
-	if !hasErrors && resp.NextCursor != "" {
-		state.Cursor = resp.NextCursor
+	if !hasErrors {
+		if dirOutcome.NewPrimaryCursor != "" {
+			state.Cursor = dirOutcome.NewPrimaryCursor
+		} else if resp.NextCursor != "" {
+			state.Cursor = resp.NextCursor
+		}
 	}
 
 	if len(resp.Changes) > 0 {
@@ -280,4 +322,3 @@ func executePlansAndReport(cmd *cobra.Command, plans []types.SyncPlan, localDir,
 
 	return result, nil
 }
-
