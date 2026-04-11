@@ -106,7 +106,6 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{t: t, client: c, localDir: localDir, basePath: uniqueBasePath}
 }
 
-
 func cleanRemote(c *client.Client, prefix string) {
 	files, err := c.ListAllRecursive(prefix)
 	if err != nil {
@@ -228,10 +227,12 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 		e.t.Fatalf("Walk: %v", err)
 	}
 
-	remoteFiles, err := e.client.ListAllRecursive("")
+	// ADR 0039/0040: atomic snapshot + cursor.
+	remoteFiles, snapshotCursor, err := FetchSnapshotAsRemoteFiles(e.client, "")
 	if err != nil {
-		e.t.Fatalf("ListAllRecursive: %v", err)
+		e.t.Fatalf("Snapshot: %v", err)
 	}
+	PrefillArchiveForIdempotentApply(state.Files, localFiles, remoteFiles)
 
 	plans := Compare(localFiles, remoteFiles, state.Files)
 	result, err := Execute(plans, e.localDir, "", e.client, state, false)
@@ -239,9 +240,8 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 		e.t.Fatalf("Execute: %v", err)
 	}
 
-	cursor, err := e.client.LatestCursor()
-	if err == nil {
-		state.Cursor = cursor
+	if snapshotCursor != "" {
+		state.Cursor = snapshotCursor
 	}
 	if err := SaveState(e.localDir, state); err != nil {
 		e.t.Fatalf("SaveState: %v", err)
@@ -265,10 +265,6 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	if err != nil {
 		e.t.Fatalf("PollChanges: %v", err)
 	}
-	if resp.ResyncRequired {
-		state.Cursor = ""
-		return e.initialSync(state)
-	}
 
 	// Filter self-changes (disabled when skipSelfFilter is set,
 	// since test uses same token for both local sync and remote changes).
@@ -286,13 +282,46 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 		remoteChanges = append(remoteChanges, ch)
 	}
 
-	plans := CompareIncremental(localFiles, state.Files, remoteChanges)
+	// Hybrid strategy: split dir events (archive walk / snapshot fetch)
+	// from file events (CompareIncremental) — see ADR 0040.
+	var dirChanges, fileChanges []types.ChangeEntry
+	for _, ch := range remoteChanges {
+		if ch.IsDir {
+			dirChanges = append(dirChanges, ch)
+		} else {
+			fileChanges = append(fileChanges, ch)
+		}
+	}
+
+	dirOutcome, err := HandleIncrementalDirEvents(
+		e.client, e.localDir, state.Files, dirChanges,
+	)
+	if err != nil {
+		e.t.Fatalf("HandleIncrementalDirEvents: %v", err)
+	}
+	if dirOutcome.LocalChanged || len(dirOutcome.SubtreeSnapshots) > 0 {
+		localFiles, err = Walk(e.localDir, state.Files, exclude)
+		if err != nil {
+			e.t.Fatalf("Walk (post dir events): %v", err)
+		}
+	}
+
+	subtreePlans := dirOutcome.SubtreeComparePlans(localFiles, state.Files)
+	fileLevelPlans := CompareIncremental(localFiles, state.Files, fileChanges)
+	plans := MergePlansByPath(
+		fileLevelPlans,
+		subtreePlans,
+		dirOutcome.ArchiveWalkPlans,
+	)
+
 	result, err := Execute(plans, e.localDir, "", e.client, state, false)
 	if err != nil {
 		e.t.Fatalf("Execute: %v", err)
 	}
 
-	if resp.NextCursor != "" {
+	if dirOutcome.NewPrimaryCursor != "" {
+		state.Cursor = dirOutcome.NewPrimaryCursor
+	} else if resp.NextCursor != "" {
 		state.Cursor = resp.NextCursor
 	}
 	if err := SaveState(e.localDir, state); err != nil {
@@ -752,7 +781,6 @@ func TestS32_PullDuringLocalEdit(t *testing.T) {
 	}
 }
 
-
 // --- Cross-token sync tests ---
 
 // parentRelPath returns a path relative to the parent token's scope,
@@ -821,15 +849,16 @@ func TestScoped_CrossToken(t *testing.T) {
 	})
 }
 
-// --- S22: resync_required via scope ancestor move ---
+// --- S22: ancestor move → transformed scope-wide delete (ADR 0038 decision 4) ---
 
-// TestScoped_S22_ResyncRequired_AncestorMove: moving an ancestor directory of
-// the token's scope triggers resync_required in the changes feed.
-//
-// Setup: dynamically create a 2-level nested token (base_path="/s22-outer-{ts}/inner/")
-// using root token delegation. Then move the outer directory.
-// isAncestorOfScope fires because "s22-outer-{ts}" is an ancestor of "s22-outer-{ts}/inner".
-func TestScoped_S22_ResyncRequired_AncestorMove(t *testing.T) {
+// TestScoped_S22_AncestorMoveBecomesDelete: moving an ancestor directory
+// of the token's scope used to set `resync_required` on the changes
+// feed (ADR 0038 original). SELF-287 replaced that flag with an explicit
+// event transform: ChangeLogService rewrites the is_dir move into a
+// `delete /` entry targeting every affected access_path, so the client
+// can handle it via the hybrid strategy (ADR 0040 §操作×スコープマトリクス
+// case #9 "ancestor move out").
+func TestScoped_S22_AncestorMoveBecomesDelete(t *testing.T) {
 	pc, parentBase := parentClient(t)
 
 	// Create nested token under the parent's scope:
@@ -866,13 +895,20 @@ func TestScoped_S22_ResyncRequired_AncestorMove(t *testing.T) {
 		t.Skipf("move not supported: %v", err)
 	}
 
-	// Poll changes with nested token — should get resync_required
+	// Poll changes with nested token — the ancestor move should surface
+	// as a transformed `delete /` entry (is_dir=true).
 	resp, err := nestedClient.PollChanges(cursor)
 	if err != nil {
 		t.Fatalf("PollChanges: %v", err)
 	}
-	if !resp.ResyncRequired {
-		t.Errorf("resync_required should be true after ancestor directory %q was moved", outerDir)
+	foundScopeDelete := false
+	for _, ch := range resp.Changes {
+		if ch.IsDir && ch.Action == "delete" && (ch.PathBefore == "/" || ch.PathBefore == "") {
+			foundScopeDelete = true
+			break
+		}
+	}
+	if !foundScopeDelete {
+		t.Errorf("expected a transformed `delete /` entry after ancestor move; got %+v", resp.Changes)
 	}
 }
-

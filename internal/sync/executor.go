@@ -63,7 +63,17 @@ func execute(
 	result := &ExecuteResult{}
 
 	for _, plan := range plans {
-		localPath := filepath.Join(localRoot, filepath.FromSlash(plan.Path))
+		// Defence-in-depth: every plan path came from either Walk (local
+		// filesystem, trusted) or from server data via Compare /
+		// CompareIncremental / HandleIncrementalDirEvents. safeJoin
+		// rejects `..`, null bytes and post-clean root escapes so a
+		// malicious or buggy server cannot trick the executor into
+		// writing outside localRoot.
+		localPath, err := safeJoin(localRoot, plan.Path)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("unsafe plan path %s: %w", plan.Path, err))
+			continue
+		}
 		remoteKey := remotePrefix + plan.Path
 
 		switch plan.Action {
@@ -86,7 +96,7 @@ func execute(
 				result.Pulled++
 				continue
 			}
-			if err := executePull(localPath, remoteKey, plan.Path, c, state, deps.beforePullCommit); err != nil {
+			if err := executePull(localPath, remoteKey, plan.Path, plan.RevisionID, c, state, deps.beforePullCommit); err != nil {
 				if errors.Is(err, errPullAborted) {
 					result.Conflicts++
 					continue
@@ -135,8 +145,25 @@ func execute(
 				result.Conflicts++
 				continue
 			}
-			if err := executeConflict(localPath, remoteKey, plan.Path, localRoot, c, state); err != nil {
+			if err := executeConflict(localPath, remoteKey, plan.Path, plan.RevisionID, localRoot, c, state); err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("conflict %s: %w", plan.Path, err))
+				continue
+			}
+			result.Conflicts++
+
+		case types.PreserveLocalRename:
+			// Used when the server has removed a file (dir delete,
+			// scope-out move) but the local copy has edits we must
+			// not destroy. We rename to .sync-conflict-* and drop the
+			// archive entry — critically, we do NOT push back, which
+			// would resurrect the subtree the server just removed.
+			if dryRun {
+				fmt.Printf("[dry-run] preserve-local-rename: %s\n", plan.Path)
+				result.Conflicts++
+				continue
+			}
+			if err := executePreserveLocalRename(localPath, plan.Path, state); err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("preserve %s: %w", plan.Path, err))
 				continue
 			}
 			result.Conflicts++
@@ -270,7 +297,7 @@ func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c
 	return nil
 }
 
-func executePull(localPath, remoteKey, relPath string, c *client.Client, state *State, beforePullCommit func(string)) error {
+func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Client, state *State, beforePullCommit func(string)) error {
 	// Safety check: verify local hasn't changed since archive
 	var preHash string
 	if prev, ok := state.Files[relPath]; ok {
@@ -282,7 +309,18 @@ func executePull(localPath, remoteKey, relPath string, c *client.Client, state *
 		preHash = currentHash
 	}
 
-	dl, err := c.Download(remoteKey)
+	// Prefer the race-free revision-pinned fetch when a revision id is
+	// available (ADR 0040 §2段階fetchflow). Fall back to path-based
+	// download for legacy callers that don't carry one.
+	var (
+		dl  *client.DownloadResult
+		err error
+	)
+	if revisionID != "" {
+		dl, err = c.DownloadRevision(revisionID)
+	} else {
+		dl, err = c.Download(remoteKey)
+	}
 	if err != nil {
 		return err
 	}
@@ -352,9 +390,18 @@ func executePull(localPath, remoteKey, relPath string, c *client.Client, state *
 // Special case: on initial sync (no archive), both sides exist but we don't
 // know if they're identical. We download remote, compare hashes, and if
 // identical treat as no-op (just record state).
-func executeConflict(localPath, remoteKey, relPath, localRoot string, c *client.Client, state *State) error {
-	// Download remote version
-	dl, err := c.Download(remoteKey)
+func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string, c *client.Client, state *State) error {
+	// Download remote version. Prefer revision-pinned fetch for race-free
+	// conflict resolution when we have the id (ADR 0040 §2段階fetchflow).
+	var (
+		dl  *client.DownloadResult
+		err error
+	)
+	if revisionID != "" {
+		dl, err = c.DownloadRevision(revisionID)
+	} else {
+		dl, err = c.Download(remoteKey)
+	}
 	if err != nil {
 		if err == client.ErrNotFound {
 			// Remote was deleted; push local to resolve conflict (local wins).
@@ -465,6 +512,31 @@ func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, s
 		Size:           info.Size(),
 		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
+	return nil
+}
+
+// executePreserveLocalRename renames the local file to a
+// .sync-conflict-* copy and drops its archive entry. Used when the
+// server has authoritatively removed the file (dir delete / scope-out
+// move) but the local copy diverged and must not be destroyed.
+// Crucially, NO network call — pushing the local copy back would
+// resurrect the subtree the server just deleted.
+func executePreserveLocalRename(localPath, relPath string, state *State) error {
+	// If local is already gone there's nothing to preserve; just untrack.
+	if _, err := os.Stat(localPath); err != nil {
+		if os.IsNotExist(err) {
+			delete(state.Files, relPath)
+			fmt.Printf("preserved (already gone): %s\n", relPath)
+			return nil
+		}
+		return err
+	}
+	conflictPath := conflictFileName(localPath)
+	if err := os.Rename(localPath, conflictPath); err != nil {
+		return err
+	}
+	delete(state.Files, relPath)
+	fmt.Printf("preserved local as %s: %s\n", filepath.Base(conflictPath), relPath)
 	return nil
 }
 

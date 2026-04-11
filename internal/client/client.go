@@ -22,13 +22,16 @@ import (
 
 // Sentinel errors.
 var (
-	ErrPreconditionFailed = fmt.Errorf("precondition failed: resource was modified")
-	ErrConflict           = fmt.Errorf("conflict: resource already exists")
-	ErrCursorGone         = fmt.Errorf("cursor gone: full resync required")
-	ErrNotFound           = fmt.Errorf("not found")
-	ErrForbidden          = fmt.Errorf("forbidden")
-	ErrUnauthorized       = fmt.Errorf("unauthorized: invalid or expired token")
+	ErrPreconditionFailed   = fmt.Errorf("precondition failed: resource was modified")
+	ErrConflict             = fmt.Errorf("conflict: resource already exists")
+	ErrCursorGone           = fmt.Errorf("cursor gone: full resync required")
+	ErrNotFound             = fmt.Errorf("not found")
+	ErrForbidden            = fmt.Errorf("forbidden")
+	ErrUnauthorized         = fmt.Errorf("unauthorized: invalid or expired token")
 	ErrStorageLimitExceeded = fmt.Errorf("storage limit exceeded")
+	// ErrSubtreeCapExceeded is returned when /api/snapshot rejects a subtree
+	// larger than the server's configured cap (ADR 0038 OQ2 / ADR 0039 §Errors).
+	ErrSubtreeCapExceeded = fmt.Errorf("subtree cap exceeded: server refused atomic snapshot")
 )
 
 // Client talks to the S2 REST API.
@@ -76,6 +79,11 @@ func (c *Client) filesURL(path string) string {
 }
 
 // checkStatus maps common HTTP status codes to sentinel errors.
+//
+// Note: 413 on /api/files/* means "storage quota exceeded"; 413 on
+// /api/snapshot means "subtree cap exceeded". Callers that need to
+// distinguish the two should inspect the endpoint; this helper returns
+// the storage-quota error by default and `Snapshot()` overrides it.
 func checkStatus(resp *http.Response) error {
 	switch resp.StatusCode {
 	case 401:
@@ -586,6 +594,95 @@ func (c *Client) CancelUpload(sessionID string) error {
 		return fmt.Errorf("cancel upload failed with status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// --- Snapshot primitive (ADR 0039) ---
+
+// Snapshot fetches an atomic subtree snapshot from GET /api/snapshot.
+// An empty `path` (or "/") snapshots the token's scope root — used for
+// bootstrap and 410 recovery. A non-empty `path` snapshots a subtree —
+// used for scope-crossing `put` events and restore operations in the
+// hybrid strategy (ADR 0040 §hybrid 戦略の分岐).
+//
+// The returned `Cursor` is atomic with `Items`: no writes between the
+// snapshot and the cursor can be missed or double-counted.
+//
+// 413 / `ErrSubtreeCapExceeded` means the subtree is larger than the
+// server's configured cap. Callers must either request a smaller
+// subtree, fall back to error reporting, or wait for a future streaming
+// mode (out of scope for v1 — ADR 0038 §non-goals).
+func (c *Client) Snapshot(path string) (*types.SnapshotResponse, error) {
+	reqURL := c.url("/api/snapshot")
+	if path != "" && path != "/" {
+		reqURL += "?path=" + neturl.QueryEscape(path)
+	}
+
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 413 on /api/snapshot means "subtree cap exceeded" — distinct from
+	// the storage-quota meaning of 413 on /api/files/*.
+	if resp.StatusCode == 413 {
+		return nil, ErrSubtreeCapExceeded
+	}
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("snapshot failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+	}
+
+	var result types.SnapshotResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to parse snapshot response: %w", err)
+	}
+	return &result, nil
+}
+
+// DownloadRevision downloads file content by revision id — the race-free
+// counterpart to Download(path). See ADR 0040 §2段階fetchflow: sync
+// clients pair metadata from Snapshot() with this endpoint to avoid
+// racing with concurrent writes. Callers must close Body.
+func (c *Client) DownloadRevision(revisionID string) (*DownloadResult, error) {
+	req, err := http.NewRequest("GET", c.url("/api/revisions/"+neturl.PathEscape(revisionID)), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download revision failed: %w", err)
+	}
+
+	if err := checkStatus(resp); err != nil {
+		resp.Body.Close()
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		body := readErrorBody(resp)
+		resp.Body.Close()
+		return nil, fmt.Errorf("download revision failed with status %d: %s", resp.StatusCode, body)
+	}
+
+	cv, _ := ParseContentVersion(resp.Header.Get("ETag"))
+	size, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+
+	return &DownloadResult{
+		Body:           resp.Body,
+		ContentVersion: cv,
+		Size:           size,
+		ContentType:    resp.Header.Get("Content-Type"),
+	}, nil
 }
 
 // --- Change Log ---

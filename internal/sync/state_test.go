@@ -42,13 +42,12 @@ func TestLoadState_CorruptJSON(t *testing.T) {
 	}
 }
 
-
 func TestSaveState_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	state := &State{
-		Cursor: "opaque_cursor",
-		TokenID:      "tok_123",
-		PushedSeqs:   []int64{10, 20},
+		Cursor:     "opaque_cursor",
+		TokenID:    "tok_123",
+		PushedSeqs: []int64{10, 20},
 		Files: map[string]types.FileState{
 			"readme.md": {LocalHash: "sha256hash", ContentVersion: 42, Size: 1024},
 		},
