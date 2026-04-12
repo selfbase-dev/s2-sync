@@ -4,6 +4,7 @@ package types
 type FileState struct {
 	LocalHash      string `json:"local_hash"`
 	ContentVersion int64  `json:"content_version"`
+	RevisionID     string `json:"revision_id,omitempty"` // for idempotent apply (ADR 0040)
 	Size           int64  `json:"size"`
 	SyncedAt       string `json:"synced_at"`
 }
@@ -83,6 +84,7 @@ type SyncPlan struct {
 	Path       string
 	Action     SyncAction
 	RevisionID string
+	Hash       string // "" = unknown; for idempotent apply (ADR 0040)
 }
 
 // --- API request types ---

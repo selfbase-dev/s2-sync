@@ -341,6 +341,206 @@ func TestExecute_Conflict_Remote404_PushesLocal(t *testing.T) {
 	}
 }
 
+// --- SELF-315: 404 fallback tests ---
+
+func TestExecute_Pull_RevisionPruned_FallsBackToPath(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/revisions/rev-pruned" {
+			w.WriteHeader(404)
+			return
+		}
+		if r.Method == "GET" {
+			// path-based download succeeds
+			w.Header().Set("ETag", `"8"`)
+			w.Write([]byte("latest content"))
+		}
+	})
+
+	localDir := t.TempDir()
+	state := &State{Files: map[string]types.FileState{}}
+	plans := []types.SyncPlan{{Path: "doc.txt", Action: types.Pull, RevisionID: "rev-pruned"}}
+
+	result, err := Execute(plans, localDir, "prefix/", c, state, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Pulled != 1 {
+		t.Errorf("pulled = %d, want 1", result.Pulled)
+	}
+	data, _ := os.ReadFile(filepath.Join(localDir, "doc.txt"))
+	if string(data) != "latest content" {
+		t.Errorf("content = %q, want %q", string(data), "latest content")
+	}
+	fs := state.Files["doc.txt"]
+	if fs.ContentVersion != 8 {
+		t.Errorf("content_version = %d, want 8", fs.ContentVersion)
+	}
+	// Fallback → RevisionID not recorded
+	if fs.RevisionID != "" {
+		t.Errorf("revision_id = %q, want empty (fallback)", fs.RevisionID)
+	}
+}
+
+func TestExecute_Pull_RevisionPruned_FileAlsoDeleted(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.WriteHeader(404) // both revision and path return 404
+		}
+	})
+
+	localDir := t.TempDir()
+	state := &State{Files: map[string]types.FileState{}}
+	plans := []types.SyncPlan{{Path: "gone.txt", Action: types.Pull, RevisionID: "rev-gone"}}
+
+	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
+	if len(result.Errors) == 0 {
+		t.Error("expected error when both revision and path return 404")
+	}
+}
+
+func TestExecute_Pull_RevisionPinned_RecordsRevisionID(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.Header().Set("ETag", `"5"`)
+			w.Write([]byte("pinned content"))
+		}
+	})
+
+	localDir := t.TempDir()
+	state := &State{Files: map[string]types.FileState{}}
+	plans := []types.SyncPlan{{Path: "doc.txt", Action: types.Pull, RevisionID: "rev-abc"}}
+
+	Execute(plans, localDir, "prefix/", c, state, false)
+
+	fs := state.Files["doc.txt"]
+	if fs.RevisionID != "rev-abc" {
+		t.Errorf("revision_id = %q, want %q", fs.RevisionID, "rev-abc")
+	}
+}
+
+func TestExecute_Conflict_RevisionPruned_FallsBack(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/revisions/rev-old" {
+			w.WriteHeader(404)
+			return
+		}
+		if r.Method == "GET" {
+			w.Header().Set("ETag", `"6"`)
+			w.Write([]byte("remote version"))
+		}
+		if r.Method == "PUT" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "n1", "name": "file.txt", "size": 13,
+				"hash": "abc", "etag": `"7"`,
+			})
+		}
+	})
+
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("local version"), 0644)
+
+	state := &State{Files: map[string]types.FileState{}}
+	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict, RevisionID: "rev-old"}}
+
+	result, err := Execute(plans, localDir, "prefix/", c, state, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Conflicts != 1 {
+		t.Errorf("conflicts = %d, want 1", result.Conflicts)
+	}
+}
+
+// --- SELF-315: idempotent apply tests ---
+
+func TestExecute_Pull_IdempotentSkip_RevisionID(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be called when idempotent skip fires")
+	})
+
+	localDir := t.TempDir()
+	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("content"), 0644)
+
+	state := &State{Files: map[string]types.FileState{
+		"file.txt": {LocalHash: "h1", ContentVersion: 5, RevisionID: "rev-same"},
+	}}
+	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, RevisionID: "rev-same"}}
+
+	result, err := Execute(plans, localDir, "prefix/", c, state, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Pulled != 0 {
+		t.Errorf("pulled = %d, want 0 (should be skipped)", result.Pulled)
+	}
+}
+
+func TestExecute_Pull_NoSkip_HashOnlyNotSufficient(t *testing.T) {
+	// Hash match alone must NOT skip — it would leave ContentVersion stale
+	// and bypass the local-change safety check in executePull.
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.Header().Set("ETag", `"4"`)
+			w.Write([]byte("new content"))
+		}
+	})
+
+	localDir := t.TempDir()
+	// No pre-existing local file — archive entry with matching hash but
+	// no RevisionID should still result in a download.
+	state := &State{Files: map[string]types.FileState{}}
+	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, Hash: "some-hash"}}
+
+	result, err := Execute(plans, localDir, "prefix/", c, state, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Pulled != 1 {
+		t.Errorf("pulled = %d, want 1 (hash-only must not skip)", result.Pulled)
+	}
+}
+
+func TestExecute_Pull_NoSkip_DeleteRecreate(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.Header().Set("ETag", `"1"`)
+			w.Write([]byte("new file content"))
+		}
+	})
+
+	localDir := t.TempDir()
+	state := &State{Files: map[string]types.FileState{
+		"file.txt": {LocalHash: "old-hash", ContentVersion: 5, RevisionID: "rev-old-node"},
+	}}
+	// Different RevisionID = different node (delete→recreate same path)
+	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, RevisionID: "rev-new-node", Hash: "new-hash"}}
+
+	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
+	if result.Pulled != 1 {
+		t.Errorf("pulled = %d, want 1 (different revision must download)", result.Pulled)
+	}
+}
+
+func TestExecute_Pull_NoSkip_NoArchive(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.Header().Set("ETag", `"1"`)
+			w.Write([]byte("content"))
+		}
+	})
+
+	localDir := t.TempDir()
+	state := &State{Files: map[string]types.FileState{}}
+	plans := []types.SyncPlan{{Path: "new.txt", Action: types.Pull, RevisionID: "rev-1"}}
+
+	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
+	if result.Pulled != 1 {
+		t.Errorf("pulled = %d, want 1 (no archive entry must download)", result.Pulled)
+	}
+}
+
 func TestExecute_DryRun(t *testing.T) {
 	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("server should not be called in dry-run mode")

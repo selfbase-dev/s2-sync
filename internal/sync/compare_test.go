@@ -316,6 +316,41 @@ func TestCompare_PlansSortedByPath(t *testing.T) {
 	}
 }
 
+func TestCompare_ThreadsHashToSyncPlan(t *testing.T) {
+	remote := map[string]types.RemoteFile{
+		"a.txt": {Size: 10, RevisionID: "rev1", Hash: "h1", ContentVersion: 7},
+	}
+	plans := Compare(nil, remote, nil)
+	if len(plans) != 1 {
+		t.Fatalf("got %d plans, want 1", len(plans))
+	}
+	p := plans[0]
+	if p.Hash != "h1" {
+		t.Errorf("Hash = %q, want %q", p.Hash, "h1")
+	}
+	if p.RevisionID != "rev1" {
+		t.Errorf("RevisionID = %q, want %q", p.RevisionID, "rev1")
+	}
+}
+
+func TestCompareIncremental_ThreadsHashToSyncPlan(t *testing.T) {
+	cv := int64(3)
+	changes := []types.ChangeEntry{
+		{Seq: 1, Action: "put", PathAfter: "/a.txt", RevisionID: "rev2", Hash: "h2", ContentVersion: &cv},
+	}
+	plans := CompareIncremental(nil, nil, changes)
+	if len(plans) != 1 {
+		t.Fatalf("got %d plans, want 1", len(plans))
+	}
+	p := plans[0]
+	if p.Hash != "h2" {
+		t.Errorf("Hash = %q, want %q", p.Hash, "h2")
+	}
+	if p.RevisionID != "rev2" {
+		t.Errorf("RevisionID = %q, want %q", p.RevisionID, "rev2")
+	}
+}
+
 // planMap converts a slice of SyncPlan to a map for easier assertion.
 func planMap(plans []types.SyncPlan) map[string]types.SyncAction {
 	m := make(map[string]types.SyncAction)

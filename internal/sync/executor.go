@@ -96,6 +96,9 @@ func execute(
 				result.Pulled++
 				continue
 			}
+			if skipIdempotentPull(plan, state) {
+				continue
+			}
 			if err := executePull(localPath, remoteKey, plan.Path, plan.RevisionID, c, state, deps.beforePullCommit); err != nil {
 				if errors.Is(err, errPullAborted) {
 					result.Conflicts++
@@ -311,13 +314,21 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 
 	// Prefer the race-free revision-pinned fetch when a revision id is
 	// available (ADR 0040 §2段階fetchflow). Fall back to path-based
-	// download for legacy callers that don't carry one.
+	// download when the pinned revision has been pruned (404).
 	var (
-		dl  *client.DownloadResult
-		err error
+		dl                  *client.DownloadResult
+		err                 error
+		downloadedRevisionID string
 	)
 	if revisionID != "" {
 		dl, err = c.DownloadRevision(revisionID)
+		if err == client.ErrNotFound {
+			fmt.Printf("warning: revision %s pruned, falling back to path download: %s\n", revisionID, relPath)
+			dl, err = c.Download(remoteKey)
+			// downloadedRevisionID stays "" — path-based download doesn't pin a revision
+		} else if err == nil {
+			downloadedRevisionID = revisionID
+		}
 	} else {
 		dl, err = c.Download(remoteKey)
 	}
@@ -378,6 +389,7 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 	state.Files[relPath] = types.FileState{
 		LocalHash:      hash,
 		ContentVersion: dl.ContentVersion,
+		RevisionID:     downloadedRevisionID,
 		Size:           info.Size(),
 		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
@@ -393,18 +405,26 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string, c *client.Client, state *State) error {
 	// Download remote version. Prefer revision-pinned fetch for race-free
 	// conflict resolution when we have the id (ADR 0040 §2段階fetchflow).
+	// Fall back to path-based download when the revision has been pruned.
 	var (
-		dl  *client.DownloadResult
-		err error
+		dl                  *client.DownloadResult
+		err                 error
+		downloadedRevisionID string
 	)
 	if revisionID != "" {
 		dl, err = c.DownloadRevision(revisionID)
+		if err == client.ErrNotFound {
+			fmt.Printf("warning: revision %s pruned, falling back to path download: %s\n", revisionID, relPath)
+			dl, err = c.Download(remoteKey)
+		} else if err == nil {
+			downloadedRevisionID = revisionID
+		}
 	} else {
 		dl, err = c.Download(remoteKey)
 	}
 	if err != nil {
 		if err == client.ErrNotFound {
-			// Remote was deleted; push local to resolve conflict (local wins).
+			// File itself deleted (not just revision pruned); push local.
 			fmt.Printf("conflict (remote deleted, pushing local): %s\n", relPath)
 			return conflictPushLocal(localPath, remoteKey, relPath, c, state)
 		}
@@ -450,6 +470,7 @@ func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string
 		state.Files[relPath] = types.FileState{
 			LocalHash:      localHash,
 			ContentVersion: dl.ContentVersion,
+			RevisionID:     downloadedRevisionID,
 			Size:           size,
 			SyncedAt:       time.Now().UTC().Format(time.RFC3339),
 		}
@@ -551,4 +572,27 @@ func conflictFileName(path string) string {
 		return fmt.Sprintf("%s.sync-conflict-%s%s", base, ts, ext)
 	}
 	return fmt.Sprintf("%s.sync-conflict-%s", base, ts)
+}
+
+// skipIdempotentPull returns true when the archive already has the exact
+// revision that the plan wants to pull, making the download redundant.
+// Implements ADR 0040 §idempotent apply.
+//
+// Only RevisionID exact match is used — it guarantees identical immutable
+// content (ADR 0021) and that the archive metadata (ContentVersion, etc.)
+// is already correct from the previous download. Hash-based skip was
+// rejected: it would leave ContentVersion stale (breaking CAS on next
+// push) and bypass the local-change safety check in executePull.
+func skipIdempotentPull(plan types.SyncPlan, state *State) bool {
+	prev, ok := state.Files[plan.Path]
+	if !ok {
+		return false
+	}
+
+	if plan.RevisionID != "" && prev.RevisionID != "" && prev.RevisionID == plan.RevisionID {
+		fmt.Printf("skipped (same revision): %s\n", plan.Path)
+		return true
+	}
+
+	return false
 }

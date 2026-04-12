@@ -51,6 +51,7 @@ func Compare(
 				Path:       path,
 				Action:     action,
 				RevisionID: r.RevisionID,
+				Hash:       r.Hash,
 			})
 		}
 	}
@@ -209,6 +210,7 @@ func CompareIncremental(
 				Path:       path,
 				Action:     action,
 				RevisionID: rch.RevisionID,
+				Hash:       rch.Hash,
 			})
 		}
 	}
