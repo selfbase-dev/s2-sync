@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 // Paths are normalised to the slash-free keys used throughout the sync
 // pipeline (stripping the leading "/" that the server adds via
 // absolutePathToClient). Entries with traversal components, null bytes
-// or absolute-path indicators are silently dropped — the executor
+// or absolute-path indicators are dropped with a warning — the executor
 // would refuse to write them anyway, and we don't want a malicious
 // snapshot to abort the whole sync.
 func SnapshotToRemoteFiles(items []types.SnapshotItem) map[string]types.RemoteFile {
@@ -27,6 +28,7 @@ func SnapshotToRemoteFiles(items []types.SnapshotItem) map[string]types.RemoteFi
 		}
 		key := strings.TrimPrefix(it.Path, "/")
 		if !isSafeRelativePath(key) {
+			fmt.Printf("warning: skipping unsafe snapshot path: %s\n", it.Path)
 			continue
 		}
 		size := int64(0)

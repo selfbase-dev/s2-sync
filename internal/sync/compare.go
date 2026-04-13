@@ -80,8 +80,8 @@ func CompareIncremental(
 	normPath := func(p string) string { return strings.TrimPrefix(p, "/") }
 
 	// safeKey is normPath + defence-in-depth traversal filter. Unsafe
-	// paths (traversal, null bytes, empty) are dropped — the executor
-	// would refuse them via safeJoin anyway, and silently filtering
+	// paths (traversal, null bytes, empty) are dropped with a warning —
+	// the executor would refuse them via safeJoin anyway, and filtering
 	// here keeps a single bad change entry from derailing the whole
 	// sync batch.
 	safeKey := func(p string) (string, bool) {
