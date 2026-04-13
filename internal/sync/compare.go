@@ -1,7 +1,7 @@
 package sync
 
 import (
-	"sort"
+	"fmt"
 	"strings"
 
 	"github.com/selfbase-dev/s2-cli/internal/types"
@@ -56,9 +56,7 @@ func Compare(
 		}
 	}
 
-	sort.Slice(plans, func(i, j int) bool {
-		return plans[i].Path < plans[j].Path
-	})
+	sortPlansByPath(plans)
 
 	return plans
 }
@@ -82,13 +80,14 @@ func CompareIncremental(
 	normPath := func(p string) string { return strings.TrimPrefix(p, "/") }
 
 	// safeKey is normPath + defence-in-depth traversal filter. Unsafe
-	// paths (traversal, null bytes, empty) are dropped — the executor
-	// would refuse them via safeJoin anyway, and silently filtering
+	// paths (traversal, null bytes, empty) are dropped with a warning —
+	// the executor would refuse them via safeJoin anyway, and filtering
 	// here keeps a single bad change entry from derailing the whole
 	// sync batch.
 	safeKey := func(p string) (string, bool) {
 		k := normPath(p)
 		if !isSafeRelativePath(k) {
+			fmt.Printf("warning: skipping unsafe remote path: %s\n", p)
 			return "", false
 		}
 		return k, true
@@ -215,9 +214,7 @@ func CompareIncremental(
 		}
 	}
 
-	sort.Slice(plans, func(i, j int) bool {
-		return plans[i].Path < plans[j].Path
-	})
+	sortPlansByPath(plans)
 
 	return plans
 }

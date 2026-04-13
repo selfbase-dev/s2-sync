@@ -18,6 +18,28 @@ import (
 // detected after download. The caller treats this as a conflict, not an error.
 var errPullAborted = errors.New("pull aborted: local file modified during download")
 
+// downloadWithFallback fetches content using a revision-pinned request when
+// revisionID is available (ADR 0040 §2段階fetchflow), falling back to a
+// path-based download when the revision has been pruned (404).
+// Returns the download result, the confirmed revision ID (empty if fallback
+// was used), and any error.
+func downloadWithFallback(c *client.Client, revisionID, remoteKey, relPath string) (*client.DownloadResult, string, error) {
+	if revisionID != "" {
+		dl, err := c.DownloadRevision(revisionID)
+		if err == client.ErrNotFound {
+			fmt.Printf("warning: revision %s pruned, falling back to path download: %s\n", revisionID, relPath)
+			dl, err = c.Download(remoteKey)
+			return dl, "", err // path-based download doesn't pin a revision
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return dl, revisionID, nil
+	}
+	dl, err := c.Download(remoteKey)
+	return dl, "", err
+}
+
 // ChunkedUploadThreshold is the file size above which chunked upload is used.
 const ChunkedUploadThreshold = 10 * 1024 * 1024 // 10 MB
 
@@ -312,26 +334,7 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 		preHash = currentHash
 	}
 
-	// Prefer the race-free revision-pinned fetch when a revision id is
-	// available (ADR 0040 §2段階fetchflow). Fall back to path-based
-	// download when the pinned revision has been pruned (404).
-	var (
-		dl                  *client.DownloadResult
-		err                 error
-		downloadedRevisionID string
-	)
-	if revisionID != "" {
-		dl, err = c.DownloadRevision(revisionID)
-		if err == client.ErrNotFound {
-			fmt.Printf("warning: revision %s pruned, falling back to path download: %s\n", revisionID, relPath)
-			dl, err = c.Download(remoteKey)
-			// downloadedRevisionID stays "" — path-based download doesn't pin a revision
-		} else if err == nil {
-			downloadedRevisionID = revisionID
-		}
-	} else {
-		dl, err = c.Download(remoteKey)
-	}
+	dl, downloadedRevisionID, err := downloadWithFallback(c, revisionID, remoteKey, relPath)
 	if err != nil {
 		return err
 	}
@@ -403,25 +406,7 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 // know if they're identical. We download remote, compare hashes, and if
 // identical treat as no-op (just record state).
 func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string, c *client.Client, state *State) error {
-	// Download remote version. Prefer revision-pinned fetch for race-free
-	// conflict resolution when we have the id (ADR 0040 §2段階fetchflow).
-	// Fall back to path-based download when the revision has been pruned.
-	var (
-		dl                  *client.DownloadResult
-		err                 error
-		downloadedRevisionID string
-	)
-	if revisionID != "" {
-		dl, err = c.DownloadRevision(revisionID)
-		if err == client.ErrNotFound {
-			fmt.Printf("warning: revision %s pruned, falling back to path download: %s\n", revisionID, relPath)
-			dl, err = c.Download(remoteKey)
-		} else if err == nil {
-			downloadedRevisionID = revisionID
-		}
-	} else {
-		dl, err = c.Download(remoteKey)
-	}
+	dl, downloadedRevisionID, err := downloadWithFallback(c, revisionID, remoteKey, relPath)
 	if err != nil {
 		if err == client.ErrNotFound {
 			// File itself deleted (not just revision pruned); push local.
@@ -457,7 +442,13 @@ func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string
 		// Local might not exist (delete-vs-change conflict)
 		localHash = ""
 	}
-	remoteHash, _ := hashFile(tmpPath)
+	remoteHash, err := hashFile(tmpPath)
+	if err != nil {
+		// tmpPath was written moments ago — if we can't hash it,
+		// something is seriously wrong; treat as error, not conflict.
+		os.Remove(tmpPath)
+		return fmt.Errorf("hash temp file for conflict comparison: %w", err)
+	}
 
 	if localHash != "" && localHash == remoteHash {
 		// Identical content — not a real conflict, just record state
