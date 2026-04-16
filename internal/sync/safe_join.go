@@ -30,6 +30,24 @@ func (e *UnsafePathError) Error() string {
 	return fmt.Sprintf("unsafe sync path %q: %s", e.RawPath, e.Reason)
 }
 
+// isSafeRelativePath does a cheap string-level validation for paths
+// that will later be fed into safeJoin. It is a filter, not a
+// validator — safeJoin is the authoritative check.
+func isSafeRelativePath(p string) bool {
+	if p == "" {
+		return false
+	}
+	if strings.ContainsRune(p, 0) {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // safeJoin validates a server-derived relative path and joins it with
 // the sync root. It rejects:
 //

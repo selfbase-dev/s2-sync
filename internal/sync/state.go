@@ -44,7 +44,6 @@ func LoadState(syncRoot string) (*State, error) {
 
 	var state State
 	if err := json.Unmarshal(data, &state); err != nil {
-		// Corrupt state: treat as first sync
 		return newEmptyState(), nil
 	}
 
@@ -93,7 +92,6 @@ func (s *State) IsPushedSeq(seq int64) bool {
 }
 
 // PrunePushedSeqs removes seqs that are older than the given cursor's minimum seq.
-// Called after polling to clean up stale entries.
 func (s *State) PrunePushedSeqs(minSeq int64) {
 	kept := s.PushedSeqs[:0]
 	for _, seq := range s.PushedSeqs {

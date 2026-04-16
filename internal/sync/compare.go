@@ -2,10 +2,15 @@ package sync
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/selfbase-dev/s2-cli/internal/types"
 )
+
+func sortPlansByPath(plans []types.SyncPlan) {
+	sort.Slice(plans, func(i, j int) bool { return plans[i].Path < plans[j].Path })
+}
 
 // Compare performs three-way comparison between local, remote, and archive states.
 // Returns a list of sync plans sorted by path.

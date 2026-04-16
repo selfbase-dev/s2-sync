@@ -52,24 +52,6 @@ func SnapshotToRemoteFiles(items []types.SnapshotItem) map[string]types.RemoteFi
 	return out
 }
 
-// isSafeRelativePath does a cheap string-level validation for paths
-// that will later be fed into safeJoin. It is a filter, not a
-// validator — safeJoin is the authoritative check.
-func isSafeRelativePath(p string) bool {
-	if p == "" {
-		return false
-	}
-	if strings.ContainsRune(p, 0) {
-		return false
-	}
-	for _, seg := range strings.Split(p, "/") {
-		if seg == ".." {
-			return false
-		}
-	}
-	return true
-}
-
 // PrefillArchiveForIdempotentApply populates `archive` with FileState
 // entries for files whose local hash already matches the server hash
 // from a fresh snapshot. Those entries let Compare short-circuit to
