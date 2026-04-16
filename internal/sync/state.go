@@ -104,6 +104,17 @@ func (s *State) PrunePushedSeqs(minSeq int64) {
 	s.PushedSeqs = kept
 }
 
+// RecordFile updates the archive entry for a synced file.
+func (s *State) RecordFile(path, hash string, cv int64, size int64, revisionID string) {
+	s.Files[path] = types.FileState{
+		LocalHash:      hash,
+		ContentVersion: cv,
+		RevisionID:     revisionID,
+		Size:           size,
+		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
 func newEmptyState() *State {
 	return &State{
 		Version: currentStateVersion,

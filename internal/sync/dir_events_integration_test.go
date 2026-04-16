@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/selfbase-dev/s2-cli/internal/client"
@@ -29,6 +30,27 @@ func fakeSnapshotServer(t *testing.T, responses map[string]types.SnapshotRespons
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+// fakeBootstrapServer builds a mock that supports the full Bootstrap
+// protocol: /api/changes/latest (pin S0), /api/snapshot (fetch), and
+// /api/changes?after= (converge with empty changes).
+func fakeBootstrapServer(t *testing.T, snapshot types.SnapshotResponse, latestCursor string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/changes/latest":
+			_ = json.NewEncoder(w).Encode(types.LatestCursorResponse{Cursor: latestCursor})
+		case "/api/snapshot":
+			_ = json.NewEncoder(w).Encode(snapshot)
+		case "/api/changes":
+			_ = json.NewEncoder(w).Encode(types.ChangesResponse{})
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.NotFound(w, r)
+		}
 	}))
 }
 
@@ -208,18 +230,18 @@ func TestHandleIncrementalDirEvents_PutSubtreeSnapshot(t *testing.T) {
 
 // TestHandleIncrementalDirEvents_PutScopeRootReplacesCursor exercises
 // ADR 0040 cases #10/#12: scope-root put (ancestor enter / restore)
-// triggers /api/snapshot and REPLACES the primary cursor wholesale.
+// runs the full Bootstrap protocol (ADR 0046) and REPLACES the primary
+// cursor with the converged cursor.
 func TestHandleIncrementalDirEvents_PutScopeRootReplacesCursor(t *testing.T) {
 	dir := t.TempDir()
 
-	srv := fakeSnapshotServer(t, map[string]types.SnapshotResponse{
-		"": {
-			Items: []types.SnapshotItem{
-				{Path: "/photos/a.jpg", Type: "file", RevisionID: "rev_a", Hash: "h-a", ContentVersion: 1, Size: int64Ptr(4)},
-			},
-			Cursor: "cursor_root",
+	snapshot := types.SnapshotResponse{
+		Items: []types.SnapshotItem{
+			{Path: "/photos/a.jpg", Type: "file", RevisionID: "rev_a", Hash: "h-a", ContentVersion: 1, Size: int64Ptr(4)},
 		},
-	})
+		Cursor: "cursor_snapshot",
+	}
+	srv := fakeBootstrapServer(t, snapshot, "cursor_s0")
 	defer srv.Close()
 	c := client.New(srv.URL, "s2_test")
 
@@ -232,12 +254,148 @@ func TestHandleIncrementalDirEvents_PutScopeRootReplacesCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.NewPrimaryCursor != "cursor_root" {
-		t.Errorf("NewPrimaryCursor = %q, want %q", outcome.NewPrimaryCursor, "cursor_root")
+	// Bootstrap converges: pinned cursor_s0, snapshot succeeded, poll
+	// returns empty → converged cursor is cursor_s0 (not snapshot cursor).
+	if outcome.NewPrimaryCursor != "cursor_s0" {
+		t.Errorf("NewPrimaryCursor = %q, want %q (converged cursor from Bootstrap)", outcome.NewPrimaryCursor, "cursor_s0")
 	}
 	plans := outcome.SubtreeComparePlans(map[string]types.LocalFile{}, archive)
 	if len(plans) != 1 || plans[0].Action != types.Pull {
 		t.Errorf("plans = %+v", plans)
+	}
+}
+
+// TestHandleIncrementalDirEvents_PutScopeRootClearsStalePlans is a
+// regression test: when a batch has `delete /foo` followed by `put /`,
+// the scope-root bootstrap must clear the stale DeleteLocal plans from
+// the earlier delete. Otherwise MergePlansByPath (archiveWalk wins)
+// would erroneously delete files that the bootstrap shows still exist.
+func TestHandleIncrementalDirEvents_PutScopeRootClearsStalePlans(t *testing.T) {
+	dir := t.TempDir()
+	h := writeLocalFileExpectHash(t, dir, "foo/a.txt", "content")
+
+	archive := map[string]types.FileState{
+		"foo/a.txt": {LocalHash: h, ContentVersion: 1},
+	}
+
+	snapshot := types.SnapshotResponse{
+		Items: []types.SnapshotItem{
+			{Path: "/foo/a.txt", Type: "file", RevisionID: "rev_a", Hash: "h-a", ContentVersion: 2, Size: int64Ptr(7)},
+		},
+		Cursor: "cursor_snap",
+	}
+	srv := fakeBootstrapServer(t, snapshot, "cursor_s0")
+	defer srv.Close()
+	c := client.New(srv.URL, "s2_test")
+
+	changes := []types.ChangeEntry{
+		{Action: "delete", IsDir: true, PathBefore: "/foo"},
+		{Action: "put", IsDir: true, PathAfter: "/"},
+	}
+	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The delete produced ArchiveWalkPlans, but the subsequent put /
+	// must have cleared them.
+	if len(outcome.ArchiveWalkPlans) != 0 {
+		t.Errorf("ArchiveWalkPlans = %d, want 0 (scope-root put must clear stale plans)", len(outcome.ArchiveWalkPlans))
+	}
+	if outcome.NewPrimaryCursor == "" {
+		t.Error("NewPrimaryCursor should be set by scope-root bootstrap")
+	}
+	// The bootstrap snapshot contains foo/a.txt, so Compare should
+	// produce a plan for it (Pull since archive was mutated by delete).
+	plans := outcome.SubtreeComparePlans(
+		map[string]types.LocalFile{"foo/a.txt": {Hash: h}},
+		archive,
+	)
+	for _, p := range plans {
+		if p.Path == "foo/a.txt" && p.Action == types.DeleteLocal {
+			t.Errorf("foo/a.txt should NOT be DeleteLocal — scope-root bootstrap is authoritative")
+		}
+	}
+}
+
+// TestHandleIncrementalDirEvents_PutSubtree413Fallback exercises the
+// 413 fallback path: /api/snapshot returns 413, FetchRemoteMap falls
+// back to ListDir recursive descent. No cursor update for subtree.
+func TestHandleIncrementalDirEvents_PutSubtree413Fallback(t *testing.T) {
+	dir := t.TempDir()
+	hash := "abc123"
+	cv := int64(2)
+	revID := "rev_x"
+	size := int64(11)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/snapshot":
+			w.WriteHeader(413)
+		case strings.HasSuffix(r.URL.Path, "/vacation/"):
+			_ = json.NewEncoder(w).Encode(types.ListResponse{
+				Items: []types.FileItem{
+					{Name: "photo.jpg", Type: "file", Hash: &hash, ContentVersion: &cv, RevisionID: &revID, Size: &size},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := client.New(srv.URL, "s2_test")
+
+	archive := map[string]types.FileState{}
+	changes := []types.ChangeEntry{
+		{Action: "put", IsDir: true, PathAfter: "/vacation"},
+	}
+	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NewPrimaryCursor != "" {
+		t.Errorf("NewPrimaryCursor = %q, want empty for subtree 413 fallback", outcome.NewPrimaryCursor)
+	}
+	if len(outcome.SubtreeSnapshots) != 1 {
+		t.Fatalf("snapshots = %d, want 1", len(outcome.SubtreeSnapshots))
+	}
+	snap := outcome.SubtreeSnapshots[0]
+	if snap.Prefix != "vacation/" {
+		t.Errorf("prefix = %q, want %q", snap.Prefix, "vacation/")
+	}
+	if len(snap.Remote) != 1 {
+		t.Fatalf("remote files = %d, want 1", len(snap.Remote))
+	}
+	if _, ok := snap.Remote["vacation/photo.jpg"]; !ok {
+		t.Errorf("expected vacation/photo.jpg in remote map, got %v", snap.Remote)
+	}
+}
+
+// TestHandleIncrementalDirEvents_PutSubtree413Then404 exercises the
+// 413→ListDir→404 path: snapshot returns 413, then ListDir returns
+// 404 (subtree deleted during the fallback). The wrapped error must
+// still be recognized via errors.Is and silently dropped.
+func TestHandleIncrementalDirEvents_PutSubtree413Then404(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/snapshot" {
+			w.WriteHeader(413)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+	c := client.New(srv.URL, "s2_test")
+
+	changes := []types.ChangeEntry{
+		{Action: "put", IsDir: true, PathAfter: "/vanished"},
+	}
+	outcome, err := HandleIncrementalDirEvents(c, dir, map[string]types.FileState{}, changes)
+	if err != nil {
+		t.Fatalf("expected silent drop on 413→ListDir→404, got: %v", err)
+	}
+	if len(outcome.SubtreeSnapshots) != 0 {
+		t.Errorf("snapshots = %+v, want none", outcome.SubtreeSnapshots)
 	}
 }
 

@@ -96,6 +96,41 @@ func TestPushedSeqs_AddAndCheck(t *testing.T) {
 	}
 }
 
+func TestRecordFile(t *testing.T) {
+	s := newEmptyState()
+	s.RecordFile("docs/a.txt", "h1", 42, 1024, "rev_1")
+
+	fs, ok := s.Files["docs/a.txt"]
+	if !ok {
+		t.Fatal("expected docs/a.txt in Files")
+	}
+	if fs.LocalHash != "h1" {
+		t.Errorf("LocalHash = %q, want h1", fs.LocalHash)
+	}
+	if fs.ContentVersion != 42 {
+		t.Errorf("ContentVersion = %d, want 42", fs.ContentVersion)
+	}
+	if fs.Size != 1024 {
+		t.Errorf("Size = %d, want 1024", fs.Size)
+	}
+	if fs.RevisionID != "rev_1" {
+		t.Errorf("RevisionID = %q, want rev_1", fs.RevisionID)
+	}
+	if fs.SyncedAt == "" {
+		t.Error("SyncedAt should be set")
+	}
+}
+
+func TestRecordFile_EmptyRevisionID(t *testing.T) {
+	s := newEmptyState()
+	s.RecordFile("file.txt", "h2", 1, 100, "")
+
+	fs := s.Files["file.txt"]
+	if fs.RevisionID != "" {
+		t.Errorf("RevisionID = %q, want empty", fs.RevisionID)
+	}
+}
+
 func TestPushedSeqs_Prune(t *testing.T) {
 	s := newEmptyState()
 	s.AddPushedSeq(10)

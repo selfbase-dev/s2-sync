@@ -2,7 +2,7 @@
 //
 // The server emits directory-level events for bulk operations: delete a
 // subtree, move a subtree, restore from trash, scope-external put, etc.
-// The CLI handles each event in one of three ways:
+// The CLI handles each event in one of four ways:
 //
 //   1. Archive walk — delete / move within scope. Walk the archive +
 //      local filesystem under the prefix, hash-check every touched
@@ -10,23 +10,23 @@
 //      PreserveLocalRename plans (delete) or perform os.Rename in
 //      place (move). No network traffic.
 //
-//   2. Subtree snapshot fetch — put dir / restore / ancestor enter /
-//      scope-root operations. Call /api/snapshot?path=X to get the
-//      fresh atomic state. The caller runs Compare() on this remote
-//      map AFTER re-walking the local tree, so a user edit between
-//      the dir-event and the file-level compare cannot be overwritten
-//      (fix for codex review blocker #2).
+//   2. Full bootstrap — scope-root put (ancestor enter, restore, etc.).
+//      Runs the ADR 0046 bootstrap protocol (pin S0, fetch via
+//      Snapshot or ListDir on 413, converge). The converged cursor
+//      replaces the primary cursor. Any earlier plans in the same
+//      batch are cleared because the bootstrap result is authoritative
+//      for the entire scope.
 //
-//   3. os.MkdirAll — mkdir events. Pure local side effect, no plans.
+//   3. Subtree fetch — non-root put dir. Tries /api/snapshot first;
+//      falls back to ListDir on 413 (weaker consistency, corrected
+//      on next sync cycle). Does NOT replace the primary cursor.
 //
-// Scope-root put (ADR 0040 §cursor semantics) uses the snapshot's
-// cursor as the new primary cursor, effectively re-bootstrapping.
-// Subtree put does NOT replace the primary cursor — it's a hint for
-// that subtree.
+//   4. os.MkdirAll — mkdir events. Pure local side effect, no plans.
 
 package sync
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,10 +41,10 @@ func sortPlansByPath(plans []types.SyncPlan) {
 	sort.Slice(plans, func(i, j int) bool { return plans[i].Path < plans[j].Path })
 }
 
-// SubtreeSnapshot carries one /api/snapshot response that the caller
-// must Compare() AFTER re-walking the local tree. Prefix is the slash-
-// terminated client-relative path the snapshot was taken at, or ""
-// for a scope-root snapshot.
+// SubtreeSnapshot carries a remote file map (from Snapshot, ListDir
+// fallback, or Bootstrap) that the caller must Compare() AFTER
+// re-walking the local tree. Prefix is the slash-terminated client-
+// relative path, or "" for a scope-root fetch.
 type SubtreeSnapshot struct {
 	Prefix string
 	Remote map[string]types.RemoteFile
@@ -154,38 +154,61 @@ func HandleIncrementalDirEvents(
 
 		case "put":
 			isRoot := ch.PathAfter == "" || ch.PathAfter == "/"
-			snapshotPath := ""
-			if !isRoot {
-				// Validate path before passing to server. safeRelPrefix
-				// is the same validation the archive walk uses.
+
+			if isRoot {
+				// Scope-root put = re-bootstrap (ADR 0040 §cursor
+				// semantics). Bootstrap handles 413→ListDir fallback
+				// and runs the convergence protocol (ADR 0046) so the
+				// returned cursor is safe to adopt as primary.
+				//
+				// Clear earlier plans from this batch: the bootstrap
+				// result is authoritative for the entire scope, so
+				// delete/move plans that preceded this put are stale.
+				// Note: preceding moves may have rekeyed archive and
+				// renamed local files — those side effects remain, but
+				// Compare against the bootstrap's remote map still
+				// produces correct plans (moved files without remote
+				// match get DeleteLocal, missing files get Pull).
+				outcome.ArchiveWalkPlans = nil
+				outcome.SubtreeSnapshots = nil
+
+				remote, cursor, err := Bootstrap(c)
+				if err != nil {
+					return nil, fmt.Errorf("bootstrap (scope-root put): %w", err)
+				}
+				outcome.SubtreeSnapshots = append(outcome.SubtreeSnapshots, SubtreeSnapshot{
+					Prefix: "",
+					Remote: remote,
+				})
+				outcome.NewPrimaryCursor = cursor
+			} else {
 				if _, err := safeRelPrefix(ch.PathAfter); err != nil {
 					return nil, fmt.Errorf("put %s: %w", ch.PathAfter, err)
 				}
-				snapshotPath = ch.PathAfter
-			}
-			remote, cursor, err := FetchSnapshotAsRemoteFiles(c, snapshotPath)
-			if err != nil {
-				if err == client.ErrNotFound {
-					// Race: the put subtree was gone by the time we
-					// asked for it. Next poll will deliver a delete
-					// and the archive walk will clean up.
-					continue
+				// Subtree put: FetchRemoteMap tries Snapshot first and
+				// falls back to ListDir on 413 (ADR 0046 designed the
+				// split-fetch for bootstrap; reuse here accepts weaker
+				// consistency — ListDir reads are non-atomic across
+				// directories). Correctness relies on:
+				//   1. Primary cursor is NOT replaced (advances via
+				//      resp.NextCursor), so missed files appear as
+				//      change events on the next poll.
+				//   2. Archive records what was applied, so duplicates
+				//      from a slightly-ahead ListDir become NoOps.
+				//   3. Compare + archive prevents overwriting local
+				//      edits regardless of remote map staleness.
+				remote, err := FetchRemoteMap(c, ch.PathAfter)
+				if err != nil {
+					if errors.Is(err, client.ErrNotFound) {
+						continue
+					}
+					return nil, fmt.Errorf("fetch subtree %s: %w", ch.PathAfter, err)
 				}
-				return nil, fmt.Errorf("snapshot %s: %w", snapshotPath, err)
-			}
-
-			prefix := ""
-			if !isRoot {
-				// safeRelPrefix above already validated; ignore the
-				// error here.
-				prefix, _ = safeRelPrefix(ch.PathAfter)
-			}
-			outcome.SubtreeSnapshots = append(outcome.SubtreeSnapshots, SubtreeSnapshot{
-				Prefix: prefix,
-				Remote: remote,
-			})
-			if isRoot {
-				outcome.NewPrimaryCursor = cursor
+				prefix, _ := safeRelPrefix(ch.PathAfter)
+				outcome.SubtreeSnapshots = append(outcome.SubtreeSnapshots, SubtreeSnapshot{
+					Prefix: prefix,
+					Remote: remote,
+				})
 			}
 		}
 	}

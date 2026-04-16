@@ -271,3 +271,19 @@ func classifyNoArchive(hasLocal, hasRemote bool) types.SyncAction {
 		return types.NoOp
 	}
 }
+
+// HasLocalChanges reports whether any local file has changed (added,
+// modified, or deleted) relative to the archive.
+func HasLocalChanges(local map[string]types.LocalFile, archive map[string]types.FileState) bool {
+	for path, l := range local {
+		if a, ok := archive[path]; !ok || l.Hash != a.LocalHash {
+			return true
+		}
+	}
+	for path := range archive {
+		if _, ok := local[path]; !ok {
+			return true
+		}
+	}
+	return false
+}

@@ -15,7 +15,6 @@ import (
 	"github.com/selfbase-dev/s2-cli/internal/auth"
 	"github.com/selfbase-dev/s2-cli/internal/client"
 	s2sync "github.com/selfbase-dev/s2-cli/internal/sync"
-	"github.com/selfbase-dev/s2-cli/internal/types"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -151,7 +150,6 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s is not a directory", localDir)
 	}
 
-	// Create default .s2ignore if missing
 	if err := s2sync.EnsureIgnoreFile(localDir); err != nil {
 		return fmt.Errorf("failed to create .s2ignore: %w", err)
 	}
@@ -164,14 +162,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	endpoint := viper.GetString("endpoint")
 	c := client.New(endpoint, token)
 
-	// Derive remotePrefix from base_path
 	me, err := c.Me()
 	if err != nil {
 		return fmt.Errorf("failed to get auth context: %w", err)
 	}
 	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
 
-	// Mutex for sync serialization
 	var syncMu sync.Mutex
 
 	// Initial full sync
@@ -180,14 +176,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
-	// Setup context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Setup fsnotify watcher
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
@@ -205,14 +199,13 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Watching %s ↔ %s (poll every %s, Ctrl+C to stop)\n",
 		localDir, remotePrefix, watchPollInterval)
 
-	// Build poll function
 	pollFn := func() (bool, bool, error) {
 		state, err := s2sync.LoadState(localDir)
 		if err != nil {
 			return false, false, err
 		}
 		if state.Cursor == "" {
-			return false, true, nil // need full sync
+			return false, true, nil
 		}
 		resp, err := c.PollChanges(state.Cursor)
 		if err == client.ErrCursorGone {
@@ -221,9 +214,6 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return false, false, err
 		}
-		// ADR 0038 decision 4: resync_required removed. Scope-wide events
-		// arrive as explicit `delete /` / `put /` entries.
-		// Filter self-changes: seq-based only (see SELF-317)
 		hasRemoteChanges := false
 		for _, ch := range resp.Changes {
 			if state.IsPushedSeq(ch.Seq) {
@@ -232,19 +222,14 @@ func runWatch(cmd *cobra.Command, args []string) error {
 			hasRemoteChanges = true
 			break
 		}
-		// Always trigger doSync when there are any changes (including self-only
-		// batches) so runIncrementalSyncInner can advance the cursor. Without this,
-		// a batch of only self-changes is never consumed and the cursor stalls.
 		hasCursorWork := len(resp.Changes) > 0
 		return hasRemoteChanges || hasCursorWork, false, nil
 	}
 
-	// Build sync function
 	syncFn := func() error {
 		return doSync(cmd, localDir, remotePrefix, c, &syncMu)
 	}
 
-	// Run watch loop
 	go watchLoop(WatchLoopConfig{
 		SyncFn:       syncFn,
 		PollFn:       pollFn,
@@ -254,14 +239,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		Ctx:          ctx,
 	})
 
-	// Wait for signal
 	<-sigCh
 	fmt.Fprintln(cmd.OutOrStdout(), "\nShutting down...")
 	cancel()
 	return nil
 }
 
-// doSync performs a full sync cycle with mutex for serialization.
 func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, mu *sync.Mutex) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -271,162 +254,17 @@ func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client,
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 
+	opts := s2sync.SyncOptions{
+		Stdout: cmd.OutOrStdout(),
+		Stderr: cmd.ErrOrStderr(),
+	}
+
 	if state.Cursor == "" {
-		return runInitialSyncInner(cmd, localDir, remotePrefix, c, state)
+		return s2sync.RunInitialSync(c, localDir, remotePrefix, state, opts)
 	}
-	return runIncrementalSyncInner(cmd, localDir, remotePrefix, c, state)
+	return s2sync.RunIncrementalSync(c, localDir, remotePrefix, state, opts)
 }
 
-func runInitialSyncInner(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State) error {
-	// Clear archive for fresh comparison (see sync.go runInitialSync comment)
-	state.Files = make(map[string]types.FileState)
-
-	exclude := s2sync.LoadExclude(localDir)
-	localFiles, err := s2sync.Walk(localDir, state.Files, exclude)
-	if err != nil {
-		return fmt.Errorf("local scan failed: %w", err)
-	}
-
-	// Atomic scope-root snapshot (ADR 0039) — same rationale as
-	// runInitialSync in sync.go.
-	remoteFiles, snapshotCursor, err := s2sync.FetchSnapshotAsRemoteFiles(c, "")
-	if err != nil {
-		return fmt.Errorf("remote snapshot failed: %w", err)
-	}
-	s2sync.PrefillArchiveForIdempotentApply(state.Files, localFiles, remoteFiles)
-
-	plans := s2sync.Compare(localFiles, remoteFiles, state.Files)
-
-	var hasErrors bool
-	if len(plans) > 0 {
-		ts := time.Now().Format("15:04:05")
-		counts := make(map[types.SyncAction]int)
-		for _, p := range plans {
-			counts[p.Action]++
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "[%s] sync: %d push, %d pull, %d delete, %d conflict\n",
-			ts, counts[types.Push], counts[types.Pull],
-			counts[types.DeleteLocal]+counts[types.DeleteRemote], counts[types.Conflict])
-
-		result, err := s2sync.Execute(plans, localDir, remotePrefix, c, state, false)
-		if err != nil {
-			return err
-		}
-		if len(result.Errors) > 0 {
-			hasErrors = true
-			for _, e := range result.Errors {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  error: %v\n", e)
-			}
-		}
-	}
-
-	// Only adopt the snapshot cursor if no errors — partial failures
-	// must not mark the client as caught up.
-	if !hasErrors && snapshotCursor != "" {
-		state.Cursor = snapshotCursor
-	}
-
-	return s2sync.SaveState(localDir, state)
-}
-
-func runIncrementalSyncInner(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State) error {
-	exclude := s2sync.LoadExclude(localDir)
-	localFiles, err := s2sync.Walk(localDir, state.Files, exclude)
-	if err != nil {
-		return fmt.Errorf("local scan failed: %w", err)
-	}
-
-	resp, err := c.PollChanges(state.Cursor)
-	if err == client.ErrCursorGone {
-		state.Cursor = ""
-		return runInitialSyncInner(cmd, localDir, remotePrefix, c, state)
-	}
-	if err != nil {
-		return fmt.Errorf("poll changes failed: %w", err)
-	}
-	// ADR 0038 decision 4: resync_required removed. Scope-wide events
-	// arrive as explicit `delete /` / `put /` entries.
-
-	// Filter self-changes: seq-based only (see SELF-317)
-	var remoteChanges []types.ChangeEntry
-	for _, ch := range resp.Changes {
-		if state.IsPushedSeq(ch.Seq) {
-			continue
-		}
-		remoteChanges = append(remoteChanges, ch)
-	}
-
-	// Split dir and file events — hybrid strategy (ADR 0040).
-	var dirChanges, fileChanges []types.ChangeEntry
-	for _, ch := range remoteChanges {
-		if ch.IsDir {
-			dirChanges = append(dirChanges, ch)
-		} else {
-			fileChanges = append(fileChanges, ch)
-		}
-	}
-
-	dirOutcome, err := s2sync.HandleIncrementalDirEvents(
-		c, localDir, state.Files, dirChanges,
-	)
-	if err != nil {
-		return fmt.Errorf("dir event handling: %w", err)
-	}
-	if dirOutcome.LocalChanged || len(dirOutcome.SubtreeSnapshots) > 0 {
-		localFiles, err = s2sync.Walk(localDir, state.Files, exclude)
-		if err != nil {
-			return fmt.Errorf("local re-scan failed: %w", err)
-		}
-	}
-
-	subtreePlans := dirOutcome.SubtreeComparePlans(localFiles, state.Files)
-	fileLevelPlans := s2sync.CompareIncremental(localFiles, state.Files, fileChanges)
-	plans := s2sync.MergePlansByPath(
-		fileLevelPlans,
-		subtreePlans,
-		dirOutcome.ArchiveWalkPlans,
-	)
-
-	var hasErrors bool
-	if len(plans) > 0 {
-		ts := time.Now().Format("15:04:05")
-		counts := make(map[types.SyncAction]int)
-		for _, p := range plans {
-			counts[p.Action]++
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "[%s] sync: %d push, %d pull, %d delete, %d conflict\n",
-			ts, counts[types.Push], counts[types.Pull],
-			counts[types.DeleteLocal]+counts[types.DeleteRemote], counts[types.Conflict])
-
-		result, err := s2sync.Execute(plans, localDir, remotePrefix, c, state, false)
-		if err != nil {
-			return err
-		}
-		if len(result.Errors) > 0 {
-			hasErrors = true
-			for _, e := range result.Errors {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  error: %v\n", e)
-			}
-		}
-	}
-
-	// Scope-root snapshots replace the primary cursor wholesale, same
-	// as in sync.go (ADR 0040 §cursor semantics).
-	if !hasErrors {
-		if dirOutcome.NewPrimaryCursor != "" {
-			state.Cursor = dirOutcome.NewPrimaryCursor
-		} else if resp.NextCursor != "" {
-			state.Cursor = resp.NextCursor
-		}
-		if len(resp.Changes) > 0 {
-			state.PrunePushedSeqs(resp.Changes[0].Seq)
-		}
-	}
-
-	return s2sync.SaveState(localDir, state)
-}
-
-// addWatchDirs recursively adds directories to the fsnotify watcher.
 func addWatchDirs(watcher *fsnotify.Watcher, root string, exclude func(string) bool) error {
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

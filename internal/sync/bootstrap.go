@@ -13,6 +13,7 @@
 package sync
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -66,7 +67,7 @@ func fetchRemoteMapViaListDir(c *client.Client, path string) (map[string]types.R
 		if item.Type == "directory" {
 			subFiles, err := FetchRemoteMap(c, "/"+fullPath)
 			if err != nil {
-				if err == client.ErrNotFound {
+				if errors.Is(err, client.ErrNotFound) {
 					continue
 				}
 				return nil, err
@@ -281,7 +282,7 @@ func drainDirtyQueue(c *client.Client, queue []string, remoteFiles map[string]ty
 	for _, path := range queue {
 		subFiles, err := FetchRemoteMap(c, "/"+path)
 		if err != nil {
-			if err == client.ErrNotFound {
+			if errors.Is(err, client.ErrNotFound) {
 				continue
 			}
 			return fmt.Errorf("drain %s: %w", path, err)

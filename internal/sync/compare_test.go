@@ -359,3 +359,51 @@ func planMap(plans []types.SyncPlan) map[string]types.SyncAction {
 	}
 	return m
 }
+
+func TestHasLocalChanges(t *testing.T) {
+	tests := []struct {
+		name    string
+		local   map[string]types.LocalFile
+		archive map[string]types.FileState
+		want    bool
+	}{
+		{
+			name:    "identical",
+			local:   map[string]types.LocalFile{"a.txt": {Hash: "h1"}},
+			archive: map[string]types.FileState{"a.txt": {LocalHash: "h1"}},
+			want:    false,
+		},
+		{
+			name:    "both empty",
+			local:   map[string]types.LocalFile{},
+			archive: map[string]types.FileState{},
+			want:    false,
+		},
+		{
+			name:    "local modified",
+			local:   map[string]types.LocalFile{"a.txt": {Hash: "h2"}},
+			archive: map[string]types.FileState{"a.txt": {LocalHash: "h1"}},
+			want:    true,
+		},
+		{
+			name:    "local new file",
+			local:   map[string]types.LocalFile{"a.txt": {Hash: "h1"}, "b.txt": {Hash: "h2"}},
+			archive: map[string]types.FileState{"a.txt": {LocalHash: "h1"}},
+			want:    true,
+		},
+		{
+			name:    "local deleted",
+			local:   map[string]types.LocalFile{},
+			archive: map[string]types.FileState{"a.txt": {LocalHash: "h1"}},
+			want:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := HasLocalChanges(tt.local, tt.archive)
+			if got != tt.want {
+				t.Errorf("HasLocalChanges() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -26,7 +26,7 @@ var errPullAborted = errors.New("pull aborted: local file modified during downlo
 func downloadWithFallback(c *client.Client, revisionID, remoteKey, relPath string) (*client.DownloadResult, string, error) {
 	if revisionID != "" {
 		dl, err := c.DownloadRevision(revisionID)
-		if err == client.ErrNotFound {
+		if errors.Is(err, client.ErrNotFound) {
 			fmt.Printf("warning: revision %s pruned, falling back to path download: %s\n", revisionID, relPath)
 			dl, err = c.Download(remoteKey)
 			return dl, "", err // path-based download doesn't pin a revision
@@ -244,12 +244,7 @@ func executePush(localPath, remoteKey, relPath string, c *client.Client, state *
 		return err
 	}
 
-	state.Files[relPath] = types.FileState{
-		LocalHash:      hash,
-		ContentVersion: cv,
-		Size:           info.Size(),
-		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
-	}
+	state.RecordFile(relPath, hash, cv, info.Size(), "")
 	return nil
 }
 
@@ -312,12 +307,7 @@ func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c
 		return err
 	}
 
-	state.Files[relPath] = types.FileState{
-		LocalHash:      hash,
-		ContentVersion: cv,
-		Size:           totalSize,
-		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
-	}
+	state.RecordFile(relPath, hash, cv, totalSize, "")
 	return nil
 }
 
@@ -388,13 +378,7 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 		return err
 	}
 
-	state.Files[relPath] = types.FileState{
-		LocalHash:      hash,
-		ContentVersion: dl.ContentVersion,
-		RevisionID:     downloadedRevisionID,
-		Size:           info.Size(),
-		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
-	}
+	state.RecordFile(relPath, hash, dl.ContentVersion, info.Size(), downloadedRevisionID)
 	return nil
 }
 
@@ -407,7 +391,7 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string, c *client.Client, state *State) error {
 	dl, downloadedRevisionID, err := downloadWithFallback(c, revisionID, remoteKey, relPath)
 	if err != nil {
-		if err == client.ErrNotFound {
+		if errors.Is(err, client.ErrNotFound) {
 			// File itself deleted (not just revision pruned); push local.
 			fmt.Printf("conflict (remote deleted, pushing local): %s\n", relPath)
 			return conflictPushLocal(localPath, remoteKey, relPath, c, state)
@@ -457,13 +441,7 @@ func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string
 		if info != nil {
 			size = info.Size()
 		}
-		state.Files[relPath] = types.FileState{
-			LocalHash:      localHash,
-			ContentVersion: dl.ContentVersion,
-			RevisionID:     downloadedRevisionID,
-			Size:           size,
-			SyncedAt:       time.Now().UTC().Format(time.RFC3339),
-		}
+		state.RecordFile(relPath, localHash, dl.ContentVersion, size, downloadedRevisionID)
 		fmt.Printf("verified: %s (identical)\n", relPath)
 		return nil
 	}
@@ -517,12 +495,7 @@ func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, s
 		return err
 	}
 
-	state.Files[relPath] = types.FileState{
-		LocalHash:      hash,
-		ContentVersion: cv,
-		Size:           info.Size(),
-		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
-	}
+	state.RecordFile(relPath, hash, cv, info.Size(), "")
 	return nil
 }
 
