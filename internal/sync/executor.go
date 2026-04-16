@@ -237,8 +237,7 @@ func executePush(localPath, remoteKey, relPath string, c *client.Client, state *
 		state.AddPushedSeq(*result.Seq)
 	}
 
-	// Parse content_version from etag
-	cv, _ := client.ParseContentVersion(result.ETag)
+	cv := result.ContentVersion
 
 	hash, err := hashFile(localPath)
 	if err != nil {
@@ -307,7 +306,7 @@ func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c
 		state.AddPushedSeq(*result.Seq)
 	}
 
-	cv, _ := client.ParseContentVersion(result.ETag)
+	cv := result.ContentVersion
 	hash, err := hashFile(localPath)
 	if err != nil {
 		return err
@@ -508,7 +507,7 @@ func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, s
 		state.AddPushedSeq(*result.Seq)
 	}
 
-	cv, _ := client.ParseContentVersion(result.ETag)
+	cv := result.ContentVersion
 	hash, err := hashFile(localPath)
 	if err != nil {
 		return err

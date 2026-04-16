@@ -133,11 +133,15 @@ type AccessPath struct {
 
 // FileItem from directory listing (GET /api/files/{path}/).
 type FileItem struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"` // "file" or "directory"
-	Size       *int64 `json:"size,omitempty"`
-	ModifiedAt string `json:"modified_at,omitempty"`
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	Type           string  `json:"type"` // "file" or "directory"
+	Size           *int64  `json:"size,omitempty"`
+	ModifiedAt     string  `json:"modified_at,omitempty"`
+	Hash           *string `json:"hash,omitempty"`
+	RevisionID     *string `json:"revision_id,omitempty"`
+	ContentVersion *int64  `json:"content_version,omitempty"`
+	ContentType    *string `json:"content_type,omitempty"`
 }
 
 // ListResponse from GET /api/files/{path}/.
@@ -147,12 +151,12 @@ type ListResponse struct {
 
 // UploadResult from PUT /api/files/{path} or POST /api/uploads/{id}/complete.
 type UploadResult struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-	Hash string `json:"hash"`
-	ETag string `json:"etag"`
-	Seq  *int64 `json:"seq"` // changelog seq for self-change filtering (ADR 0035 #3)
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Size           int64  `json:"size"`
+	Hash           string `json:"hash"`
+	ContentVersion int64  `json:"content_version"`
+	Seq            *int64 `json:"seq"` // changelog seq for self-change filtering (ADR 0035 #3)
 }
 
 // DeleteResult from DELETE /api/files/{path}.
