@@ -34,7 +34,7 @@ func TestExecute_Push(t *testing.T) {
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(map[string]any{
 				"id": "n1", "name": "file.txt", "size": 5,
-				"hash": "abc", "etag": `"1"`, "seq": seq,
+				"hash": "abc", "content_version": int64(1), "seq": seq,
 			})
 		}
 	})
@@ -82,7 +82,7 @@ func TestExecute_Push_CAS_Update(t *testing.T) {
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(map[string]any{
 				"id": "n1", "name": "file.txt", "size": 7,
-				"hash": "def", "etag": `"2"`,
+				"hash": "def", "content_version": int64(2),
 			})
 		}
 	})
@@ -250,7 +250,7 @@ func TestExecute_Conflict_DifferentContent(t *testing.T) {
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(map[string]any{
 				"id": "n1", "name": "file.txt", "size": 13,
-				"hash": "abc", "etag": `"4"`, "seq": 99,
+				"hash": "abc", "content_version": int64(4), "seq": 99,
 			})
 		}
 	})
@@ -308,7 +308,7 @@ func TestExecute_Conflict_Remote404_PushesLocal(t *testing.T) {
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(map[string]any{
 				"id": "n1", "name": "file.txt", "size": 13,
-				"hash": "abc", "etag": `"1"`, "seq": int64(77),
+				"hash": "abc", "content_version": int64(1), "seq": int64(77),
 			})
 		}
 	})
@@ -433,7 +433,7 @@ func TestExecute_Conflict_RevisionPruned_FallsBack(t *testing.T) {
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(map[string]any{
 				"id": "n1", "name": "file.txt", "size": 13,
-				"hash": "abc", "etag": `"7"`,
+				"hash": "abc", "content_version": int64(7),
 			})
 		}
 	})

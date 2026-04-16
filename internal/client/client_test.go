@@ -268,7 +268,7 @@ func TestUpload_IfMatch_Success(t *testing.T) {
 				t.Errorf("If-Match = %q, want %q", got, `"3"`)
 			}
 			jsonResponse(w, 201, map[string]any{
-				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "etag": `"4"`,
+				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "content_version": 4,
 			})
 		},
 	})
@@ -278,9 +278,8 @@ func TestUpload_IfMatch_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upload() error: %v", err)
 	}
-	cv, _ := ParseContentVersion(result.ETag)
-	if cv != 4 {
-		t.Errorf("content_version = %d, want 4", cv)
+	if result.ContentVersion != 4 {
+		t.Errorf("content_version = %d, want 4", result.ContentVersion)
 	}
 }
 
@@ -288,7 +287,7 @@ func TestUpload_SeqInResponse(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, 201, map[string]any{
-				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "etag": `"1"`,
+				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "content_version": 1,
 				"seq": 42,
 			})
 		},
@@ -311,7 +310,7 @@ func TestUpload_SeqAbsentInResponse(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, 201, map[string]any{
-				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "etag": `"1"`,
+				"id": "n1", "name": "test.txt", "size": 5, "hash": "abc", "content_version": 1,
 			})
 		},
 	})
@@ -610,7 +609,7 @@ func TestChunkedUpload_FullFlow(t *testing.T) {
 			if strings.HasSuffix(r.URL.Path, "/complete") {
 				steps = append(steps, "complete")
 				jsonResponse(w, 200, map[string]any{
-					"id": "n1", "name": "big.bin", "size": 1000, "hash": "abc", "etag": `"1"`,
+					"id": "n1", "name": "big.bin", "size": 1000, "hash": "abc", "content_version": int64(1),
 				})
 			}
 		},
@@ -650,7 +649,7 @@ func TestCompleteUpload_SeqInResponse(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"POST /api/uploads/": func(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, 200, map[string]any{
-				"id": "n1", "name": "big.bin", "size": 1000, "hash": "abc", "etag": `"1"`,
+				"id": "n1", "name": "big.bin", "size": 1000, "hash": "abc", "content_version": int64(1),
 				"seq": 99,
 			})
 		},

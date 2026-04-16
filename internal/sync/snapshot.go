@@ -105,6 +105,7 @@ func PrefillArchiveForIdempotentApply(
 		archive[path] = types.FileState{
 			LocalHash:      l.Hash,
 			ContentVersion: r.ContentVersion,
+			RevisionID:     r.RevisionID,
 			Size:           l.Size,
 			SyncedAt:       now,
 		}

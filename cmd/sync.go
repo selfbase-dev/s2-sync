@@ -95,14 +95,14 @@ func runInitialSync(cmd *cobra.Command, localDir, remotePrefix string, c *client
 		return fmt.Errorf("local scan failed: %w", err)
 	}
 
-	// Atomic scope-root snapshot (ADR 0039 / ADR 0040 §hybrid 戦略).
-	// Returns metadata + an atomic cursor in one request — replaces the
-	// old "ListAllRecursive then LatestCursor" pair which had a race
-	// window between the listing and the cursor.
-	fmt.Fprintln(cmd.OutOrStdout(), "Fetching remote snapshot...")
-	remoteFiles, snapshotCursor, err := s2sync.FetchSnapshotAsRemoteFiles(c, "")
+	// ADR 0046: Bootstrap protocol with 413 fallback.
+	// Pins S0, fetches remote map (splitting via ListDir if snapshot
+	// returns 413), then runs delta replay to correct for changes
+	// during the fetch window.
+	fmt.Fprintln(cmd.OutOrStdout(), "Fetching remote state...")
+	remoteFiles, snapshotCursor, err := s2sync.Bootstrap(c)
 	if err != nil {
-		return fmt.Errorf("remote snapshot failed: %w", err)
+		return fmt.Errorf("bootstrap failed: %w", err)
 	}
 
 	// Idempotent apply: pre-populate the archive for files whose local
