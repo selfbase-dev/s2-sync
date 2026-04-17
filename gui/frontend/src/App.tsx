@@ -54,7 +54,7 @@ function App() {
   }, []);
 
   const handlePickFolder = async () => {
-    const f = await PickFolder();
+    const f = await PickFolder(folder);
     if (f) setFolder(f);
   };
 

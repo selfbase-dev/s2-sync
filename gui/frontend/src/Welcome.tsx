@@ -26,7 +26,7 @@ export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }:
   }, [initialFolder]);
 
   const pickFolder = async () => {
-    const f = await PickFolder();
+    const f = await PickFolder(folder);
     if (f) setFolder(f);
   };
 

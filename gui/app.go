@@ -104,15 +104,21 @@ func (a *App) ClearToken() error {
 	return auth.DeleteKeyring()
 }
 
-// PickFolder shows a native directory chooser. CanCreateDirectories
-// enables the "New Folder" button so users can create a sync root
-// from the dialog itself (otherwise the picker only browses existing
-// directories).
-func (a *App) PickFolder() (string, error) {
-	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+// PickFolder shows a native directory chooser, opening at `current`
+// when it's a valid existing directory (so Change-folder starts from
+// the folder already configured). CanCreateDirectories enables the
+// "New Folder" button so users can create a sync root from the dialog.
+func (a *App) PickFolder(current string) (string, error) {
+	opts := wailsruntime.OpenDialogOptions{
 		Title:                "Select folder to sync",
 		CanCreateDirectories: true,
-	})
+	}
+	if current != "" {
+		if info, err := os.Stat(current); err == nil && info.IsDir() {
+			opts.DefaultDirectory = current
+		}
+	}
+	return wailsruntime.OpenDirectoryDialog(a.ctx, opts)
 }
 
 // OpenFolder reveals the given path in Finder / Explorer / file manager.
