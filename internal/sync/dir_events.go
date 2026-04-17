@@ -28,13 +28,16 @@ type DirEventOutcome struct {
 }
 
 // HandleIncrementalDirEvents applies the hybrid strategy from ADR 0040
-// to every is_dir entry in `changes`.
+// to every is_dir entry in `changes`. Dir-level moves rename archive
+// rows in-place via `state.MoveFile`; dir-level deletes expand into
+// per-file plans that the executor will later carry out.
 func HandleIncrementalDirEvents(
 	c *client.Client,
 	localDir string,
-	archive map[string]types.FileState,
+	state *State,
 	changes []types.ChangeEntry,
 ) (*DirEventOutcome, error) {
+	archive := state.Files
 	outcome := &DirEventOutcome{}
 
 	for _, ch := range changes {
@@ -80,7 +83,7 @@ func HandleIncrementalDirEvents(
 				return nil, fmt.Errorf("move to %s: %w", ch.PathAfter, err)
 			}
 			plans, localMutated, err := expandArchiveMove(
-				archive, localDir, fromPrefix, toPrefix,
+				state, localDir, fromPrefix, toPrefix,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("move %s → %s: %w", fromPrefix, toPrefix, err)

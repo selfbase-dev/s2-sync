@@ -1,121 +1,348 @@
+// state.go — SQLite-backed sync archive. The archive persists across
+// runs: cursor, per-file hash/version, and pushed seqs for self-change
+// filtering. See ADR 0047 for design rationale.
+
 package sync
 
 import (
-	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"time"
+	"strings"
+	"sync"
 
 	"github.com/selfbase-dev/s2-cli/internal/types"
 )
 
-// State represents the .s2/state.json file.
-type State struct {
-	Version    int                        `json:"version"`
-	SyncedAt   string                     `json:"synced_at"`
-	Cursor     string                     `json:"cursor,omitempty"`
-	PushedSeqs []int64                    `json:"pushed_seqs,omitempty"`
-	Files      map[string]types.FileState `json:"files"`
+// Identity is the (endpoint, user, scope) tuple under which the archive
+// was populated. A mismatch at load time means the archive is stale for
+// the current token and must be discarded.
+type Identity struct {
+	Endpoint string
+	UserID   string
+	BasePath string
 }
 
-const currentStateVersion = 1
+// State wraps the SQLite-backed archive plus in-memory working set.
+// Callers mutate Files via methods so dirty tracking can emit a
+// minimal flush in Save.
+//
+// Lifetime: LoadState → use → Save (optional) → Close.
+// One *State per process per sync root; Close releases both the DB
+// handle and the .s2/state.lock advisory lock.
+type State struct {
+	mu sync.Mutex
+
+	// Files is the live archive map, exposed read-only to callers that
+	// consume it as `map[string]types.FileState` (Walk, Compare,
+	// dir_events). Mutations must route through RecordFile /
+	// DeleteFile / ClearFiles so dirty tracking captures them.
+	Files map[string]types.FileState
+
+	// Cursor is the remote change-log position.
+	Cursor string
+
+	pushedSeqs map[int64]struct{}
+
+	identity Identity
+
+	// dirty tracks paths whose row differs from what's in the DB
+	// (either updated or deleted). clearAll means the next Save wipes
+	// files table first.
+	dirty    map[string]struct{}
+	clearAll bool
+
+	// addSeqs are seqs added since the last flush; pruneBelow triggers
+	// a DELETE WHERE seq < pruneBelow at the next flush; clearSeqs
+	// wipes the pushed_seqs table (used after identity mismatch).
+	addSeqs    []int64
+	pruneBelow *int64
+	clearSeqs  bool
+
+	db   any // *sql.DB; kept as any so test helpers don't import sqlite
+	lock *fileLock
+	root string
+}
 
 // StateDir returns the .s2 directory path within the sync root.
-func StateDir(syncRoot string) string {
-	return filepath.Join(syncRoot, ".s2")
-}
+func StateDir(syncRoot string) string { return filepath.Join(syncRoot, ".s2") }
 
-// StatePath returns the state.json file path.
-func StatePath(syncRoot string) string {
-	return filepath.Join(StateDir(syncRoot), "state.json")
-}
+// DBPath returns the path to state.db.
+func DBPath(syncRoot string) string { return filepath.Join(StateDir(syncRoot), "state.db") }
 
-// LoadState reads state.json from the sync root.
-// Returns an empty state if the file doesn't exist or is corrupt.
-func LoadState(syncRoot string) (*State, error) {
-	path := StatePath(syncRoot)
-	data, err := os.ReadFile(path)
+// LockPath returns the path to the advisory lock file.
+func LockPath(syncRoot string) string { return filepath.Join(StateDir(syncRoot), "state.lock") }
+
+// LoadState opens .s2/state.db for syncRoot and loads the archive into
+// memory. Steps:
+//  1. Acquire non-blocking advisory lock on .s2/state.lock.
+//  2. Open/create state.db with the expected schema.
+//     Corruption or version mismatch → quarantine + recreate.
+//  3. Read state_meta + files + pushed_seqs into memory.
+//  4. If identity (endpoint/user/base_path) doesn't match the loaded
+//     row, discard the archive and start fresh (full resync).
+//
+// identity carries the current token's fingerprint; at first run the
+// stored identity is empty and gets written on the first Save.
+func LoadState(syncRoot string, identity Identity) (*State, error) {
+	if err := os.MkdirAll(StateDir(syncRoot), 0700); err != nil {
+		return nil, fmt.Errorf("create .s2 dir: %w", err)
+	}
+
+	lock, err := tryLock(LockPath(syncRoot))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return newEmptyState(), nil
-		}
 		return nil, err
 	}
 
-	var state State
-	if err := json.Unmarshal(data, &state); err != nil {
-		return newEmptyState(), nil
-	}
-
-	if state.Files == nil {
-		state.Files = make(map[string]types.FileState)
-	}
-	return &state, nil
-}
-
-// SaveState writes state.json atomically (write to tmp, then rename).
-func SaveState(syncRoot string, state *State) error {
-	dir := StateDir(syncRoot)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-
-	state.Version = currentStateVersion
-	state.SyncedAt = time.Now().UTC().Format(time.RFC3339)
-
-	data, err := json.MarshalIndent(state, "", "  ")
+	state, err := openAndLoad(syncRoot, identity)
 	if err != nil {
+		lock.Close()
+		return nil, err
+	}
+	state.lock = lock
+	return state, nil
+}
+
+func openAndLoad(syncRoot string, identity Identity) (*State, error) {
+	dbPath := DBPath(syncRoot)
+
+	db, err := openDB(dbPath)
+	if err != nil {
+		// Any open/schema failure → treat the DB as disposable cache,
+		// quarantine and retry once.
+		if qErr := quarantineDB(dbPath); qErr != nil {
+			return nil, fmt.Errorf("open state.db: %w (quarantine also failed: %v)", err, qErr)
+		}
+		db, err = openDB(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("re-open after quarantine: %w", err)
+		}
+	}
+
+	snap, err := loadSnapshot(dbFromAny(db))
+	if err != nil {
+		// Corrupt payload in an otherwise openable DB. Quarantine and
+		// start fresh.
+		_ = closeDB(db)
+		if qErr := quarantineDB(dbPath); qErr != nil {
+			return nil, fmt.Errorf("load snapshot: %w (quarantine also failed: %v)", err, qErr)
+		}
+		db, err = openDB(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("re-open after snapshot quarantine: %w", err)
+		}
+		snap, err = loadSnapshot(dbFromAny(db))
+		if err != nil {
+			_ = closeDB(db)
+			return nil, fmt.Errorf("load snapshot after quarantine: %w", err)
+		}
+	}
+
+	state := &State{
+		Files:      snap.Files,
+		Cursor:     snap.Cursor,
+		pushedSeqs: make(map[int64]struct{}, len(snap.PushedSeqs)),
+		identity:   Identity{Endpoint: snap.Endpoint, UserID: snap.UserID, BasePath: snap.BasePath},
+		dirty:      make(map[string]struct{}),
+		db:         db,
+		root:       syncRoot,
+	}
+	for _, seq := range snap.PushedSeqs {
+		state.pushedSeqs[seq] = struct{}{}
+	}
+
+	// Identity fingerprint: if the stored identity is set and doesn't
+	// match the current token, the archive belongs to a different
+	// scope. Discard it so initial sync rebuilds from scratch.
+	if !state.identity.isEmpty() && state.identity != identity {
+		state.resetForNewIdentity(identity)
+	} else {
+		state.identity = identity
+	}
+
+	return state, nil
+}
+
+func (id Identity) isEmpty() bool {
+	return id.Endpoint == "" && id.UserID == "" && id.BasePath == ""
+}
+
+// resetForNewIdentity empties the in-memory archive and marks flush
+// parameters so the next Save wipes files + pushed_seqs tables. Cursor
+// is cleared so the next run does an initial sync.
+func (s *State) resetForNewIdentity(newID Identity) {
+	s.Files = make(map[string]types.FileState)
+	s.Cursor = ""
+	s.pushedSeqs = make(map[int64]struct{})
+	s.addSeqs = nil
+	s.pruneBelow = nil
+	s.dirty = make(map[string]struct{})
+	s.clearAll = true
+	s.clearSeqs = true
+	s.identity = newID
+}
+
+// Close releases the DB handle and the advisory lock. Callers must
+// call Save before Close to persist changes.
+func (s *State) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var errs []string
+	if s.db != nil {
+		if err := closeDB(s.db); err != nil {
+			errs = append(errs, fmt.Sprintf("close db: %v", err))
+		}
+		s.db = nil
+	}
+	if s.lock != nil {
+		if err := s.lock.Close(); err != nil {
+			errs = append(errs, fmt.Sprintf("release lock: %v", err))
+		}
+		s.lock = nil
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// Save writes the current in-memory state back to the DB in a single
+// transaction. Only dirty entries (added/updated/deleted since the last
+// load or save) are sent.
+func (s *State) Save() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db == nil {
+		return errors.New("state: Save after Close")
+	}
+
+	p := flushParams{
+		Cursor:    s.Cursor,
+		Endpoint:  s.identity.Endpoint,
+		UserID:    s.identity.UserID,
+		BasePath:  s.identity.BasePath,
+		ClearAll:  s.clearAll,
+		ClearSeqs: s.clearSeqs,
+	}
+
+	if len(s.dirty) > 0 {
+		upserts := make(map[string]types.FileState)
+		var deletes []string
+		for path := range s.dirty {
+			if fs, ok := s.Files[path]; ok {
+				upserts[path] = fs
+			} else {
+				deletes = append(deletes, path)
+			}
+		}
+		p.Upserts = upserts
+		p.Deletes = deletes
+	}
+
+	p.AddSeqs = s.addSeqs
+	p.PruneBelow = s.pruneBelow
+
+	if err := flush(dbFromAny(s.db), p); err != nil {
 		return err
 	}
 
-	tmpPath := StatePath(syncRoot) + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return err
-	}
-
-	return os.Rename(tmpPath, StatePath(syncRoot))
+	s.dirty = make(map[string]struct{})
+	s.clearAll = false
+	s.clearSeqs = false
+	s.addSeqs = nil
+	s.pruneBelow = nil
+	return nil
 }
 
-// AddPushedSeq records a seq from a push operation for self-change filtering.
-func (s *State) AddPushedSeq(seq int64) {
-	s.PushedSeqs = append(s.PushedSeqs, seq)
-}
-
-// IsPushedSeq returns true if the seq was recorded as a push from this instance.
-func (s *State) IsPushedSeq(seq int64) bool {
-	for _, ps := range s.PushedSeqs {
-		if ps == seq {
-			return true
-		}
-	}
-	return false
-}
-
-// PrunePushedSeqs removes seqs that are older than the given cursor's minimum seq.
-func (s *State) PrunePushedSeqs(minSeq int64) {
-	kept := s.PushedSeqs[:0]
-	for _, seq := range s.PushedSeqs {
-		if seq >= minSeq {
-			kept = append(kept, seq)
-		}
-	}
-	s.PushedSeqs = kept
-}
-
-// RecordFile updates the archive entry for a synced file.
-func (s *State) RecordFile(path, hash string, cv int64, size int64, revisionID string) {
+// RecordFile upserts an archive entry. Called after a successful
+// push/pull/conflict resolution.
+func (s *State) RecordFile(path, hash string, cv int64, revisionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.Files[path] = types.FileState{
 		LocalHash:      hash,
 		ContentVersion: cv,
 		RevisionID:     revisionID,
-		Size:           size,
-		SyncedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
+	s.dirty[path] = struct{}{}
 }
 
-func newEmptyState() *State {
-	return &State{
-		Version: currentStateVersion,
-		Files:   make(map[string]types.FileState),
+// DeleteFile drops an archive entry. Called after a successful
+// local-delete or remote-delete action.
+func (s *State) DeleteFile(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Files, path)
+	s.dirty[path] = struct{}{}
+}
+
+// MoveFile atomically renames an archive entry without losing the
+// row's version metadata. Used by the directory-move handler.
+func (s *State) MoveFile(oldPath, newPath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fs, ok := s.Files[oldPath]
+	if !ok {
+		return
 	}
+	delete(s.Files, oldPath)
+	s.Files[newPath] = fs
+	s.dirty[oldPath] = struct{}{}
+	s.dirty[newPath] = struct{}{}
+}
+
+// ClearFiles wipes the in-memory archive and arranges for the next
+// Save to DELETE FROM files before re-populating. Used at the start
+// of an initial sync.
+func (s *State) ClearFiles() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Files = make(map[string]types.FileState)
+	s.dirty = make(map[string]struct{})
+	s.clearAll = true
+}
+
+// AddPushedSeq records a seq for self-change filtering.
+func (s *State) AddPushedSeq(seq int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.pushedSeqs[seq]; ok {
+		return
+	}
+	s.pushedSeqs[seq] = struct{}{}
+	s.addSeqs = append(s.addSeqs, seq)
+}
+
+// IsPushedSeq reports whether seq was emitted by this installation.
+func (s *State) IsPushedSeq(seq int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.pushedSeqs[seq]
+	return ok
+}
+
+// PrunePushedSeqs drops seqs older than minSeq from both the in-memory
+// set and, at next Save, the DB.
+func (s *State) PrunePushedSeqs(minSeq int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for seq := range s.pushedSeqs {
+		if seq < minSeq {
+			delete(s.pushedSeqs, seq)
+		}
+	}
+	if len(s.addSeqs) > 0 {
+		kept := s.addSeqs[:0]
+		for _, seq := range s.addSeqs {
+			if seq >= minSeq {
+				kept = append(kept, seq)
+			}
+		}
+		s.addSeqs = kept
+	}
+	v := minSeq
+	s.pruneBelow = &v
 }

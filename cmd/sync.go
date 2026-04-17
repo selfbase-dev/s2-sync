@@ -64,10 +64,16 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
 
-	state, err := s2sync.LoadState(localDir)
+	identity := s2sync.Identity{
+		Endpoint: endpoint,
+		UserID:   me.UserID,
+		BasePath: me.BasePath,
+	}
+	state, err := s2sync.LoadState(localDir, identity)
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
+	defer state.Close()
 
 	opts := s2sync.SyncOptions{
 		DryRun:       dryRun,

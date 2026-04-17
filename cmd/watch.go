@@ -168,11 +168,22 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
 
+	identity := s2sync.Identity{
+		Endpoint: endpoint,
+		UserID:   me.UserID,
+		BasePath: me.BasePath,
+	}
+	state, err := s2sync.LoadState(localDir, identity)
+	if err != nil {
+		return fmt.Errorf("failed to load state: %w", err)
+	}
+	defer state.Close()
+
 	var syncMu sync.Mutex
 
 	// Initial full sync
 	fmt.Fprintln(cmd.OutOrStdout(), "Running initial sync...")
-	if err := doSync(cmd, localDir, remotePrefix, c, &syncMu); err != nil {
+	if err := doSync(cmd, localDir, remotePrefix, c, state, &syncMu); err != nil {
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
@@ -200,14 +211,13 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		localDir, remotePrefix, watchPollInterval)
 
 	pollFn := func() (bool, bool, error) {
-		state, err := s2sync.LoadState(localDir)
-		if err != nil {
-			return false, false, err
-		}
-		if state.Cursor == "" {
+		syncMu.Lock()
+		cursor := state.Cursor
+		syncMu.Unlock()
+		if cursor == "" {
 			return false, true, nil
 		}
-		resp, err := c.PollChanges(state.Cursor)
+		resp, err := c.PollChanges(cursor)
 		if err == client.ErrCursorGone {
 			return false, true, nil
 		}
@@ -227,7 +237,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	syncFn := func() error {
-		return doSync(cmd, localDir, remotePrefix, c, &syncMu)
+		return doSync(cmd, localDir, remotePrefix, c, state, &syncMu)
 	}
 
 	go watchLoop(WatchLoopConfig{
@@ -245,14 +255,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, mu *sync.Mutex) error {
+func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State, mu *sync.Mutex) error {
 	mu.Lock()
 	defer mu.Unlock()
-
-	state, err := s2sync.LoadState(localDir)
-	if err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
-	}
 
 	opts := s2sync.SyncOptions{
 		Stdout: cmd.OutOrStdout(),

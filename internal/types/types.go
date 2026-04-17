@@ -1,12 +1,11 @@
 package types
 
-// FileState represents a file in the archive (state.json).
+// FileState is the archive row: what we last saw for a given path
+// after a successful sync. Persisted in .s2/state.db (ADR 0047).
 type FileState struct {
-	LocalHash      string `json:"local_hash"`
-	ContentVersion int64  `json:"content_version"`
-	RevisionID     string `json:"revision_id,omitempty"`
-	Size           int64  `json:"size"`
-	SyncedAt       string `json:"synced_at"`
+	LocalHash      string
+	ContentVersion int64
+	RevisionID     string
 }
 
 // LocalFile represents a file found during local walk.

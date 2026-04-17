@@ -61,7 +61,8 @@ type testEnv struct {
 	client         *client.Client
 	localDir       string
 	basePath       string // token's virtual root (e.g. "/" or "/e2e-scope/")
-	skipSelfFilter bool   // disable self-change filter (for testing remote changes with same token)
+	identity       Identity
+	skipSelfFilter bool // disable self-change filter (for testing remote changes with same token)
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -103,7 +104,18 @@ func newTestEnv(t *testing.T) *testEnv {
 		cleanRemote(c, "")
 	})
 
-	return &testEnv{t: t, client: c, localDir: localDir, basePath: uniqueBasePath}
+	childMe, err := c.Me()
+	if err != nil {
+		t.Fatalf("child Me: %v", err)
+	}
+
+	return &testEnv{
+		t:        t,
+		client:   c,
+		localDir: localDir,
+		basePath: uniqueBasePath,
+		identity: Identity{Endpoint: endpoint, UserID: childMe.UserID, BasePath: childMe.BasePath},
+	}
 }
 
 func cleanRemote(c *client.Client, prefix string) {
@@ -200,10 +212,11 @@ func (e *testEnv) moveRemote(from, to string) {
 // sync runs a full sync cycle (initial or incremental based on state).
 func (e *testEnv) sync() *ExecuteResult {
 	e.t.Helper()
-	state, err := LoadState(e.localDir)
+	state, err := LoadState(e.localDir, e.identity)
 	if err != nil {
 		e.t.Fatalf("LoadState: %v", err)
 	}
+	defer state.Close()
 
 	if state.Cursor == "" {
 		return e.initialSync(state)
@@ -213,7 +226,7 @@ func (e *testEnv) sync() *ExecuteResult {
 
 func (e *testEnv) initialSync(state *State) *ExecuteResult {
 	e.t.Helper()
-	state.Files = make(map[string]types.FileState)
+	state.ClearFiles()
 
 	exclude := LoadExclude(e.localDir)
 	localFiles, err := Walk(e.localDir, state.Files, exclude)
@@ -237,8 +250,8 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 	if snapshotCursor != "" {
 		state.Cursor = snapshotCursor
 	}
-	if err := SaveState(e.localDir, state); err != nil {
-		e.t.Fatalf("SaveState: %v", err)
+	if err := state.Save(); err != nil {
+		e.t.Fatalf("Save: %v", err)
 	}
 	return result
 }
@@ -285,7 +298,7 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	}
 
 	dirOutcome, err := HandleIncrementalDirEvents(
-		e.client, e.localDir, state.Files, dirChanges,
+		e.client, e.localDir, state, dirChanges,
 	)
 	if err != nil {
 		e.t.Fatalf("HandleIncrementalDirEvents: %v", err)
@@ -315,8 +328,8 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	} else if resp.NextCursor != "" {
 		state.Cursor = resp.NextCursor
 	}
-	if err := SaveState(e.localDir, state); err != nil {
-		e.t.Fatalf("SaveState: %v", err)
+	if err := state.Save(); err != nil {
+		e.t.Fatalf("Save: %v", err)
 	}
 	return result
 }
@@ -686,7 +699,11 @@ func TestS31_MaxDeleteAbort(t *testing.T) {
 	// Incremental sync should detect mass deletion
 	// Note: the max-delete check is in cmd/sync.go, not in executor.
 	// This test verifies the changes feed reports the deletes correctly.
-	state, _ := LoadState(env.localDir)
+	state, err := LoadState(env.localDir, env.identity)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	defer state.Close()
 	resp, err := env.client.PollChanges(state.Cursor)
 	if err != nil {
 		t.Fatalf("PollChanges: %v", err)
@@ -716,10 +733,11 @@ func TestS32_PullDuringLocalEdit(t *testing.T) {
 
 	// Incremental sync with hook: simulate a concurrent local write
 	// between download and commit.
-	state, err := LoadState(env.localDir)
+	state, err := LoadState(env.localDir, env.identity)
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
+	defer state.Close()
 	exclude := LoadExclude(env.localDir)
 	localFiles, err := Walk(env.localDir, state.Files, exclude)
 	if err != nil {

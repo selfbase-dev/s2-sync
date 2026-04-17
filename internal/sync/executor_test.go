@@ -42,7 +42,7 @@ func TestExecute_Push(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("hello"), 0644)
 
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Push}}
 
 	result, err := Execute(plans, localDir, "prefix/", c, state, false)
@@ -90,9 +90,9 @@ func TestExecute_Push_CAS_Update(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("updated"), 0644)
 
-	state := &State{Files: map[string]types.FileState{
+	state := testStateFromArchive(map[string]types.FileState{
 		"file.txt": {ContentVersion: 1, LocalHash: "old"},
-	}}
+	})
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Push}}
 
 	Execute(plans, localDir, "prefix/", c, state, false)
@@ -116,7 +116,7 @@ func TestExecute_Pull(t *testing.T) {
 	})
 
 	localDir := t.TempDir()
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "doc.txt", Action: types.Pull}}
 
 	result, err := Execute(plans, localDir, "prefix/", c, state, false)
@@ -154,9 +154,9 @@ func TestExecute_DeleteLocal(t *testing.T) {
 	// No server needed for local delete
 	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {})
 
-	state := &State{Files: map[string]types.FileState{
+	state := testStateFromArchive(map[string]types.FileState{
 		"gone.txt": {LocalHash: "x"},
-	}}
+	})
 	plans := []types.SyncPlan{{Path: "gone.txt", Action: types.DeleteLocal}}
 
 	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
@@ -183,9 +183,9 @@ func TestExecute_DeleteRemote(t *testing.T) {
 	})
 
 	localDir := t.TempDir()
-	state := &State{Files: map[string]types.FileState{
+	state := testStateFromArchive(map[string]types.FileState{
 		"old.txt": {LocalHash: "x"},
-	}}
+	})
 	plans := []types.SyncPlan{{Path: "old.txt", Action: types.DeleteRemote}}
 
 	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
@@ -216,7 +216,7 @@ func TestExecute_Conflict_IdenticalContent(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte(content), 0644)
 
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict}}
 
 	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
@@ -258,7 +258,7 @@ func TestExecute_Conflict_DifferentContent(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("local version"), 0644)
 
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict}}
 
 	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
@@ -316,7 +316,7 @@ func TestExecute_Conflict_Remote404_PushesLocal(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("local content"), 0644)
 
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict}}
 
 	result, err := Execute(plans, localDir, "prefix/", c, state, false)
@@ -357,7 +357,7 @@ func TestExecute_Pull_RevisionPruned_FallsBackToPath(t *testing.T) {
 	})
 
 	localDir := t.TempDir()
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "doc.txt", Action: types.Pull, RevisionID: "rev-pruned"}}
 
 	result, err := Execute(plans, localDir, "prefix/", c, state, false)
@@ -389,7 +389,7 @@ func TestExecute_Pull_RevisionPruned_FileAlsoDeleted(t *testing.T) {
 	})
 
 	localDir := t.TempDir()
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "gone.txt", Action: types.Pull, RevisionID: "rev-gone"}}
 
 	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
@@ -407,7 +407,7 @@ func TestExecute_Pull_RevisionPinned_RecordsRevisionID(t *testing.T) {
 	})
 
 	localDir := t.TempDir()
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "doc.txt", Action: types.Pull, RevisionID: "rev-abc"}}
 
 	Execute(plans, localDir, "prefix/", c, state, false)
@@ -441,7 +441,7 @@ func TestExecute_Conflict_RevisionPruned_FallsBack(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("local version"), 0644)
 
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict, RevisionID: "rev-old"}}
 
 	result, err := Execute(plans, localDir, "prefix/", c, state, false)
@@ -463,9 +463,9 @@ func TestExecute_Pull_IdempotentSkip_RevisionID(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("content"), 0644)
 
-	state := &State{Files: map[string]types.FileState{
+	state := testStateFromArchive(map[string]types.FileState{
 		"file.txt": {LocalHash: "h1", ContentVersion: 5, RevisionID: "rev-same"},
-	}}
+	})
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, RevisionID: "rev-same"}}
 
 	result, err := Execute(plans, localDir, "prefix/", c, state, false)
@@ -490,7 +490,7 @@ func TestExecute_Pull_NoSkip_HashOnlyNotSufficient(t *testing.T) {
 	localDir := t.TempDir()
 	// No pre-existing local file — archive entry with matching hash but
 	// no RevisionID should still result in a download.
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, Hash: "some-hash"}}
 
 	result, err := Execute(plans, localDir, "prefix/", c, state, false)
@@ -511,9 +511,9 @@ func TestExecute_Pull_NoSkip_DeleteRecreate(t *testing.T) {
 	})
 
 	localDir := t.TempDir()
-	state := &State{Files: map[string]types.FileState{
+	state := testStateFromArchive(map[string]types.FileState{
 		"file.txt": {LocalHash: "old-hash", ContentVersion: 5, RevisionID: "rev-old-node"},
-	}}
+	})
 	// Different RevisionID = different node (delete→recreate same path)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, RevisionID: "rev-new-node", Hash: "new-hash"}}
 
@@ -532,7 +532,7 @@ func TestExecute_Pull_NoSkip_NoArchive(t *testing.T) {
 	})
 
 	localDir := t.TempDir()
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "new.txt", Action: types.Pull, RevisionID: "rev-1"}}
 
 	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
@@ -549,7 +549,7 @@ func TestExecute_DryRun(t *testing.T) {
 	localDir := t.TempDir()
 	os.WriteFile(filepath.Join(localDir, "file.txt"), []byte("x"), 0644)
 
-	state := &State{Files: map[string]types.FileState{}}
+	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{
 		{Path: "file.txt", Action: types.Push},
 		{Path: "other.txt", Action: types.Pull},

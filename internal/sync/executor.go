@@ -99,7 +99,7 @@ func execute(
 				result.Errors = append(result.Errors, fmt.Errorf("delete local %s: %w", plan.Path, err))
 				continue
 			}
-			delete(state.Files, plan.Path)
+			state.DeleteFile(plan.Path)
 			result.Deleted++
 			fmt.Printf("deleted local: %s\n", plan.Path)
 
@@ -117,7 +117,7 @@ func execute(
 			if delResult != nil && delResult.Seq != nil {
 				state.AddPushedSeq(*delResult.Seq)
 			}
-			delete(state.Files, plan.Path)
+			state.DeleteFile(plan.Path)
 			result.Deleted++
 			fmt.Printf("deleted remote: %s\n", plan.Path)
 

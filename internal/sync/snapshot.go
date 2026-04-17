@@ -3,7 +3,6 @@ package sync
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/selfbase-dev/s2-cli/internal/client"
 	"github.com/selfbase-dev/s2-cli/internal/types"
@@ -71,7 +70,6 @@ func PrefillArchiveForIdempotentApply(
 	if archive == nil {
 		return 0
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
 	added := 0
 	for path, l := range localFiles {
 		if _, exists := archive[path]; exists {
@@ -88,8 +86,6 @@ func PrefillArchiveForIdempotentApply(
 			LocalHash:      l.Hash,
 			ContentVersion: r.ContentVersion,
 			RevisionID:     r.RevisionID,
-			Size:           l.Size,
-			SyncedAt:       now,
 		}
 		added++
 	}

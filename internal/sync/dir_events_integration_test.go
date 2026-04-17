@@ -64,7 +64,7 @@ func TestHandleIncrementalDirEvents_Mkdir(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "mkdir", IsDir: true, PathAfter: "/new/nested"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestHandleIncrementalDirEvents_DeleteInScope(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "delete", IsDir: true, PathBefore: "/vacation"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestHandleIncrementalDirEvents_DeleteScopeWide(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "delete", IsDir: true, PathBefore: "/"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestHandleIncrementalDirEvents_MoveInScope(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "move", IsDir: true, PathBefore: "/old", PathAfter: "/new"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestHandleIncrementalDirEvents_PutSubtreeSnapshot(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "put", IsDir: true, PathAfter: "/vacation"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestHandleIncrementalDirEvents_PutScopeRootReplacesCursor(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "put", IsDir: true, PathAfter: "/"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestHandleIncrementalDirEvents_PutScopeRootClearsStalePlans(t *testing.T) {
 		{Action: "delete", IsDir: true, PathBefore: "/foo"},
 		{Action: "put", IsDir: true, PathAfter: "/"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestHandleIncrementalDirEvents_PutSubtree413Fallback(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "put", IsDir: true, PathAfter: "/vacation"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestHandleIncrementalDirEvents_PutSubtree413Then404(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "put", IsDir: true, PathAfter: "/vanished"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, map[string]types.FileState{}, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(nil), changes)
 	if err != nil {
 		t.Fatalf("expected silent drop on 413→ListDir→404, got: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestHandleIncrementalDirEvents_PutSubtreeDeletedRace(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "put", IsDir: true, PathAfter: "/gone"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, map[string]types.FileState{}, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(nil), changes)
 	if err != nil {
 		t.Fatalf("unexpected error on 404 race: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestHandleIncrementalDirEvents_PathTraversalRejected(t *testing.T) {
 	changes := []types.ChangeEntry{
 		{Action: "mkdir", IsDir: true, PathAfter: "/../escape"},
 	}
-	_, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	_, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err == nil {
 		t.Fatal("expected error for traversal path, got nil")
 	}
@@ -460,7 +460,7 @@ func TestHandleIncrementalDirEvents_DeleteWithUntrackedDescendant(t *testing.T) 
 	changes := []types.ChangeEntry{
 		{Action: "delete", IsDir: true, PathBefore: "/docs"},
 	}
-	outcome, err := HandleIncrementalDirEvents(c, dir, archive, changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(archive), changes)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -57,7 +57,7 @@ func executePush(localPath, remoteKey, relPath string, c *client.Client, state *
 		return err
 	}
 
-	state.RecordFile(relPath, hash, cv, info.Size(), "")
+	state.RecordFile(relPath, hash, cv, "")
 	return nil
 }
 
@@ -120,6 +120,6 @@ func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c
 		return err
 	}
 
-	state.RecordFile(relPath, hash, cv, totalSize, "")
+	state.RecordFile(relPath, hash, cv, "")
 	return nil
 }
