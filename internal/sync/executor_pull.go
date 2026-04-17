@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // errPullAborted is returned by executePull when a concurrent local edit is

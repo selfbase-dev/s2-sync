@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/selfbase-dev/s2-cli/internal/auth"
-	"github.com/selfbase-dev/s2-cli/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/auth"
+	"github.com/selfbase-dev/s2-sync/internal/client"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // SubtreeSnapshot carries a remote file map that the caller must

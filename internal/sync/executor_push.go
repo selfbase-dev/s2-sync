@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/client"
 )
 
 // ChunkedUploadThreshold is the file size above which chunked upload is used.

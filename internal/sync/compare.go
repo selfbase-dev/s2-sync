@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 func sortPlansByPath(plans []types.SyncPlan) {

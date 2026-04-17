@@ -1,6 +1,6 @@
 package sync
 
-import "github.com/selfbase-dev/s2-cli/internal/types"
+import "github.com/selfbase-dev/s2-sync/internal/types"
 
 // testStateFromArchive builds a minimal *State around an in-memory
 // archive map for tests that exercise pure sync logic (Walk, Compare,

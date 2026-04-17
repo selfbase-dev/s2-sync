@@ -6,7 +6,7 @@ import (
 	"net/http"
 	neturl "net/url"
 
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // PollChanges fetches change events after the given cursor.

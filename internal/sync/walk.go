@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // Walk recursively scans the local directory and returns a map of relative path → LocalFile.

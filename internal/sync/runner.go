@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // SyncOptions controls sync behavior. Callers in cmd/ set these

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // Identity is the (endpoint, user, scope) tuple under which the archive

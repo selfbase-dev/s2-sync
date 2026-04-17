@@ -16,8 +16,8 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/selfbase-dev/s2-cli/cmd.version={{.Version}}
-      - -X github.com/selfbase-dev/s2-cli/cmd.commit={{.ShortCommit}}
+      - -X github.com/selfbase-dev/s2-sync/cmd.version={{.Version}}
+      - -X github.com/selfbase-dev/s2-sync/cmd.commit={{.ShortCommit}}
 
 archives:
   - format: tar.gz

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // ExecuteResult tracks the outcome of sync execution.

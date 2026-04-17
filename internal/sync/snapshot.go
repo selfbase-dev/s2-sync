@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // SnapshotToRemoteFiles projects /api/snapshot items into the file-centric

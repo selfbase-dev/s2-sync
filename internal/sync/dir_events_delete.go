@@ -3,7 +3,7 @@ package sync
 import (
 	"strings"
 
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // expandArchiveDelete walks BOTH the archive and the local filesystem

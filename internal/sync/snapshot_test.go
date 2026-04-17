@@ -3,7 +3,7 @@ package sync
 import (
 	"testing"
 
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 func int64Ptr(v int64) *int64 { return &v }

@@ -1,4 +1,4 @@
-module github.com/selfbase-dev/s2-cli
+module github.com/selfbase-dev/s2-sync
 
 go 1.26.1
 

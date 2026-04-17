@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/selfbase-dev/s2-cli/cmd"
+	"github.com/selfbase-dev/s2-sync/cmd"
 )
 
 func main() {

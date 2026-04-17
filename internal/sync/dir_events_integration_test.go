@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // fakeSnapshotServer builds an httptest.Server whose /api/snapshot

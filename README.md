@@ -4,7 +4,7 @@ CLI for [S2](https://scopeds.dev) — bidirectional file sync with S2 remote sto
 
 ## Install
 
-Download a binary from [GitHub Releases](https://github.com/selfbase-dev/s2-cli/releases) and place it in your `PATH`.
+Download a binary from [GitHub Releases](https://github.com/selfbase-dev/s2-sync/releases) and place it in your `PATH`.
 
 ## Usage
 

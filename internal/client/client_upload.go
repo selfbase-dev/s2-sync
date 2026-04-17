@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // CreateUploadSession creates a chunked upload session.

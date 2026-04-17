@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/client"
 )
 
 // executeConflict handles conflict by keeping local and saving remote as

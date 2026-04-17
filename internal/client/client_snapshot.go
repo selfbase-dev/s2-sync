@@ -7,7 +7,7 @@ import (
 	neturl "net/url"
 	"strconv"
 
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // Snapshot fetches an atomic subtree snapshot from GET /api/snapshot.

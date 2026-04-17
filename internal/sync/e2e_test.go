@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/selfbase-dev/s2-cli/internal/client"
-	"github.com/selfbase-dev/s2-cli/internal/types"
+	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
 // --- Scenario registry (ADR 0032 テスト漏れ防止) ---
