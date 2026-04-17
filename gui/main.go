@@ -29,6 +29,10 @@ func main() {
 		MinWidth:          420,
 		MinHeight:         520,
 		HideWindowOnClose: true,
+		// Menu-bar-only app: LSUIElement=true hides the Dock icon, and
+		// the window stays hidden until the user chooses "Show window"
+		// from the tray.
+		StartHidden: true,
 		SingleInstanceLock: &options.SingleInstanceLock{
 			UniqueId: "dev.selfbase.s2sync",
 			OnSecondInstanceLaunch: func(_ options.SecondInstanceData) {
