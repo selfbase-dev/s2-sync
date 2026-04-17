@@ -54,11 +54,9 @@ type State struct {
 	clearAll bool
 
 	// addSeqs are seqs added since the last flush; pruneBelow triggers
-	// a DELETE WHERE seq < pruneBelow at the next flush; clearSeqs
-	// wipes the pushed_seqs table (used after identity mismatch).
+	// a DELETE WHERE seq < pruneBelow at the next flush.
 	addSeqs    []int64
 	pruneBelow *int64
-	clearSeqs  bool
 
 	db   any // *sql.DB; kept as any so test helpers don't import sqlite
 	lock *fileLock
@@ -154,9 +152,14 @@ func openAndLoad(syncRoot string, identity Identity) (*State, error) {
 
 	// Identity fingerprint: if the stored identity is set and doesn't
 	// match the current token, the archive belongs to a different
-	// scope. Discard it so initial sync rebuilds from scratch.
+	// scope. Treat it like corruption — quarantine the DB (including
+	// -wal / -shm sidecars) and reopen empty so initial sync rebuilds
+	// from scratch. In-memory wipe alone isn't enough: a dry-run or a
+	// failure before Save would leave stale rows + WAL behind.
 	if !state.identity.isEmpty() && state.identity != identity {
-		state.resetForNewIdentity(identity)
+		if err := state.quarantineAndReopen(syncRoot, identity); err != nil {
+			return nil, fmt.Errorf("identity mismatch reset: %w", err)
+		}
 	} else {
 		state.identity = identity
 	}
@@ -164,23 +167,40 @@ func openAndLoad(syncRoot string, identity Identity) (*State, error) {
 	return state, nil
 }
 
-func (id Identity) isEmpty() bool {
-	return id.Endpoint == "" && id.UserID == "" && id.BasePath == ""
-}
-
-// resetForNewIdentity empties the in-memory archive and marks flush
-// parameters so the next Save wipes files + pushed_seqs tables. Cursor
-// is cleared so the next run does an initial sync.
-func (s *State) resetForNewIdentity(newID Identity) {
-	s.Files = make(map[string]types.FileState)
-	s.Cursor = ""
+func (s *State) quarantineAndReopen(syncRoot string, identity Identity) error {
+	dbPath := DBPath(syncRoot)
+	if s.db != nil {
+		if err := closeDB(s.db); err != nil {
+			return fmt.Errorf("close db before quarantine: %w", err)
+		}
+		s.db = nil
+	}
+	if err := quarantineDB(dbPath); err != nil {
+		return fmt.Errorf("quarantine: %w", err)
+	}
+	db, err := openDB(dbPath)
+	if err != nil {
+		return fmt.Errorf("reopen after quarantine: %w", err)
+	}
+	snap, err := loadSnapshot(dbFromAny(db))
+	if err != nil {
+		_ = closeDB(db)
+		return fmt.Errorf("load fresh snapshot: %w", err)
+	}
+	s.db = db
+	s.Files = snap.Files
+	s.Cursor = snap.Cursor
 	s.pushedSeqs = make(map[int64]struct{})
+	s.dirty = make(map[string]struct{})
+	s.clearAll = false
 	s.addSeqs = nil
 	s.pruneBelow = nil
-	s.dirty = make(map[string]struct{})
-	s.clearAll = true
-	s.clearSeqs = true
-	s.identity = newID
+	s.identity = identity
+	return nil
+}
+
+func (id Identity) isEmpty() bool {
+	return id.Endpoint == "" && id.UserID == "" && id.BasePath == ""
 }
 
 // Close releases the DB handle and the advisory lock. Callers must
@@ -220,12 +240,11 @@ func (s *State) Save() error {
 	}
 
 	p := flushParams{
-		Cursor:    s.Cursor,
-		Endpoint:  s.identity.Endpoint,
-		UserID:    s.identity.UserID,
-		BasePath:  s.identity.BasePath,
-		ClearAll:  s.clearAll,
-		ClearSeqs: s.clearSeqs,
+		Cursor:   s.Cursor,
+		Endpoint: s.identity.Endpoint,
+		UserID:   s.identity.UserID,
+		BasePath: s.identity.BasePath,
+		ClearAll: s.clearAll,
 	}
 
 	if len(s.dirty) > 0 {
@@ -251,7 +270,6 @@ func (s *State) Save() error {
 
 	s.dirty = make(map[string]struct{})
 	s.clearAll = false
-	s.clearSeqs = false
 	s.addSeqs = nil
 	s.pruneBelow = nil
 	return nil

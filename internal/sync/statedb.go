@@ -173,9 +173,8 @@ type flushParams struct {
 
 	ClearAll bool // true → DELETE FROM files before applying upserts (initial sync)
 
-	AddSeqs []int64
+	AddSeqs    []int64
 	PruneBelow *int64 // if non-nil, DELETE FROM pushed_seqs WHERE seq < *PruneBelow
-	ClearSeqs bool   // if true, DELETE FROM pushed_seqs (initial sync)
 }
 
 func flush(db *sql.DB, p flushParams) error {
@@ -233,11 +232,6 @@ func flush(db *sql.DB, p flushParams) error {
 		stmt.Close()
 	}
 
-	if p.ClearSeqs {
-		if _, err := tx.Exec(`DELETE FROM pushed_seqs`); err != nil {
-			return fmt.Errorf("clear pushed_seqs: %w", err)
-		}
-	}
 	if len(p.AddSeqs) > 0 {
 		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO pushed_seqs (seq) VALUES (?)`)
 		if err != nil {

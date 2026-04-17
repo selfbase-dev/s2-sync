@@ -44,7 +44,7 @@ func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *Stat
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
 
-	prefilled := PrefillArchiveForIdempotentApply(state.Files, localFiles, remoteFiles)
+	prefilled := PrefillArchiveForIdempotentApply(state, localFiles, remoteFiles)
 	opts.printf("Local: %d files, Remote: %d files (%d already in sync)\n",
 		len(localFiles), len(remoteFiles), prefilled)
 

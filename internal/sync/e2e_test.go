@@ -239,7 +239,7 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 	if err != nil {
 		e.t.Fatalf("Snapshot: %v", err)
 	}
-	PrefillArchiveForIdempotentApply(state.Files, localFiles, remoteFiles)
+	PrefillArchiveForIdempotentApply(state, localFiles, remoteFiles)
 
 	plans := Compare(localFiles, remoteFiles, state.Files)
 	result, err := Execute(plans, e.localDir, "", e.client, state, false)

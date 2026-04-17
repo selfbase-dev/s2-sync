@@ -177,13 +177,18 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
-	defer state.Close()
 
 	var syncMu sync.Mutex
+	// Shutdown dance lives at the bottom of runWatch: cancel the
+	// context → wait for watchLoop → drain in-flight sync via syncMu →
+	// then Close state. Do NOT `defer state.Close()` here: closing
+	// while a late AfterFunc callback is still inside doSync would
+	// race the shared *sql.DB handle.
 
 	// Initial full sync
 	fmt.Fprintln(cmd.OutOrStdout(), "Running initial sync...")
 	if err := doSync(cmd, localDir, remotePrefix, c, state, &syncMu); err != nil {
+		state.Close()
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
@@ -195,12 +200,14 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
+		state.Close()
 		return fmt.Errorf("failed to create file watcher: %w", err)
 	}
 	defer watcher.Close()
 
 	exclude := s2sync.LoadExclude(localDir)
 	if err := addWatchDirs(watcher, localDir, exclude); err != nil {
+		state.Close()
 		return fmt.Errorf("failed to watch directory: %w", err)
 	}
 
@@ -237,22 +244,40 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	syncFn := func() error {
+		// Shutdown guard: AfterFunc callbacks scheduled before cancel()
+		// may still fire after watchLoop returns. Skip them so we don't
+		// race the deferred state.Close().
+		if ctx.Err() != nil {
+			return nil
+		}
 		return doSync(cmd, localDir, remotePrefix, c, state, &syncMu)
 	}
 
-	go watchLoop(WatchLoopConfig{
-		SyncFn:       syncFn,
-		PollFn:       pollFn,
-		LocalEvents:  localChanged,
-		PollInterval: watchPollInterval,
-		Debounce:     2 * time.Second,
-		Ctx:          ctx,
-	})
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		watchLoop(WatchLoopConfig{
+			SyncFn:       syncFn,
+			PollFn:       pollFn,
+			LocalEvents:  localChanged,
+			PollInterval: watchPollInterval,
+			Debounce:     2 * time.Second,
+			Ctx:          ctx,
+		})
+	}()
 
 	<-sigCh
 	fmt.Fprintln(cmd.OutOrStdout(), "\nShutting down...")
 	cancel()
-	return nil
+	<-loopDone
+	// Drain any sync that slipped past the ctx check — Lock blocks
+	// until it returns. Holding the lock across Close also fences any
+	// late doSync caller (they will wake up after Close and see
+	// `Save after Close`, which is a no-op return).
+	syncMu.Lock()
+	closeErr := state.Close()
+	syncMu.Unlock()
+	return closeErr
 }
 
 func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State, mu *sync.Mutex) error {

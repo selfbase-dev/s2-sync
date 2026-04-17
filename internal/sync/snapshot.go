@@ -63,16 +63,16 @@ func SnapshotToRemoteFiles(items []types.SnapshotItem) map[string]types.RemoteFi
 // triggers the normal compare logic and lets the executor resolve the
 // stale state. Returns the number of entries added for observability.
 func PrefillArchiveForIdempotentApply(
-	archive map[string]types.FileState,
+	state *State,
 	localFiles map[string]types.LocalFile,
 	remoteFiles map[string]types.RemoteFile,
 ) int {
-	if archive == nil {
+	if state == nil {
 		return 0
 	}
 	added := 0
 	for path, l := range localFiles {
-		if _, exists := archive[path]; exists {
+		if _, exists := state.Files[path]; exists {
 			continue
 		}
 		r, ok := remoteFiles[path]
@@ -82,11 +82,7 @@ func PrefillArchiveForIdempotentApply(
 		if r.Hash == "" || l.Hash != r.Hash {
 			continue
 		}
-		archive[path] = types.FileState{
-			LocalHash:      l.Hash,
-			ContentVersion: r.ContentVersion,
-			RevisionID:     r.RevisionID,
-		}
+		state.RecordFile(path, l.Hash, r.ContentVersion, r.RevisionID)
 		added++
 	}
 	return added
