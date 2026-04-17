@@ -31,7 +31,7 @@ func (c *Client) CreateUploadSession(path string, totalSize int64, expectedChunk
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", c.url("/api/uploads"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(c.reqContext(), "POST", c.url("/api/uploads"), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (c *Client) CreateUploadSession(path string, totalSize int64, expectedChunk
 // UploadChunk uploads a single chunk.
 func (c *Client) UploadChunk(sessionID string, chunkIndex int, body io.Reader) error {
 	url := fmt.Sprintf("%s/api/uploads/%s/%d", c.endpoint, sessionID, chunkIndex)
-	req, err := http.NewRequest("PUT", url, body)
+	req, err := http.NewRequestWithContext(c.reqContext(), "PUT", url, body)
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func (c *Client) UploadChunk(sessionID string, chunkIndex int, body io.Reader) e
 // CompleteUpload finalizes a chunked upload session.
 func (c *Client) CompleteUpload(sessionID string) (*types.UploadResult, error) {
 	url := fmt.Sprintf("%s/api/uploads/%s/complete", c.endpoint, sessionID)
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "POST", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func (c *Client) CompleteUpload(sessionID string) (*types.UploadResult, error) {
 // CancelUpload cancels a chunked upload session.
 func (c *Client) CancelUpload(sessionID string) error {
 	url := fmt.Sprintf("%s/api/uploads/%s", c.endpoint, sessionID)
-	req, err := http.NewRequest("DELETE", url, nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "DELETE", url, nil)
 	if err != nil {
 		return err
 	}

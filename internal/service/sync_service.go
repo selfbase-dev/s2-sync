@@ -176,7 +176,9 @@ func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 
 	s.emit(Event{Type: EventStarted, Mount: &mount})
 
-	go s.run(runCtx, c, state, mount.Path, remotePrefix)
+	// Bind the client to runCtx so Stop's cancel aborts any in-flight
+	// HTTP request (Bootstrap / Pull / Push etc.).
+	go s.run(runCtx, c.WithContext(runCtx), state, mount.Path, remotePrefix)
 	return nil
 }
 

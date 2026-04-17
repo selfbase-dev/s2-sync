@@ -46,6 +46,13 @@ func (s *SyncService) run(ctx context.Context, c *client.Client, state *s2sync.S
 
 	s.emit(Event{Type: EventLog, Message: "running initial sync..."})
 	if err := doSync(); err != nil {
+		// A user-initiated Stop cancels the client's ctx, which surfaces
+		// as a transport error in the sync runner. Treat it as a clean
+		// shutdown rather than a failure.
+		if ctx.Err() != nil {
+			state.Close()
+			return
+		}
 		s.setError(fmt.Errorf("initial sync: %w", err))
 		state.Close()
 		return

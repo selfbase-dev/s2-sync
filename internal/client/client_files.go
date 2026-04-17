@@ -20,7 +20,7 @@ func (c *Client) ListDir(path string) (*types.ListResponse, error) {
 		path += "/"
 	}
 
-	req, err := http.NewRequest("GET", c.filesURL(path), nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "GET", c.filesURL(path), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ type DownloadResult struct {
 
 // Download downloads a file. Caller must close Body.
 func (c *Client) Download(path string) (*DownloadResult, error) {
-	req, err := http.NewRequest("GET", c.filesURL(path), nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "GET", c.filesURL(path), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +134,7 @@ func (c *Client) Download(path string) (*DownloadResult, error) {
 
 // HeadFile returns the content version and size without downloading.
 func (c *Client) HeadFile(path string) (contentVersion int64, size int64, err error) {
-	req, err := http.NewRequest("HEAD", c.filesURL(path), nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "HEAD", c.filesURL(path), nil)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -160,7 +160,7 @@ func (c *Client) HeadFile(path string) (contentVersion int64, size int64, err er
 
 // Upload uploads a file.
 func (c *Client) Upload(path string, body io.Reader, contentType string, ifMatchVersion int64) (*types.UploadResult, error) {
-	req, err := http.NewRequest("PUT", c.filesURL(path), body)
+	req, err := http.NewRequestWithContext(c.reqContext(), "PUT", c.filesURL(path), body)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +200,7 @@ func (c *Client) Mkdir(path string) error {
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
-	req, err := http.NewRequest("PUT", c.filesURL(path), nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "PUT", c.filesURL(path), nil)
 	if err != nil {
 		return err
 	}
@@ -223,7 +223,7 @@ func (c *Client) Mkdir(path string) error {
 
 // Delete deletes a file (soft delete to trash).
 func (c *Client) Delete(path string) (*types.DeleteResult, error) {
-	req, err := http.NewRequest("DELETE", c.filesURL(path), nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "DELETE", c.filesURL(path), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +265,7 @@ func (c *Client) Move(srcPath, dstPath string, overwrite bool) error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", c.endpoint+"/api/file-moves/"+srcPath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(c.reqContext(), "POST", c.endpoint+"/api/file-moves/"+srcPath, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
