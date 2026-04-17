@@ -6,31 +6,43 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
 func main() {
-	// Create an instance of the app structure
+	// wails.Run must own the main thread on macOS — both because it
+	// blocks the binding-generation introspection step and because
+	// AppKit lives there. Tray runs in a goroutine launched from
+	// OnStartup, after Wails has initialized NSApplication.
 	app := NewApp()
-
-	// Create application with options
 	err := wails.Run(&options.App{
-		Title:  "s2sync",
-		Width:  1024,
-		Height: 768,
+		Title:             "s2sync",
+		Width:             520,
+		Height:            640,
+		MinWidth:          420,
+		MinHeight:         520,
+		HideWindowOnClose: true,
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "dev.selfbase.s2sync",
+			OnSecondInstanceLaunch: func(_ options.SecondInstanceData) {
+				if app.ctx != nil {
+					wailsruntime.WindowShow(app.ctx)
+				}
+			},
+		},
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
+		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
 		OnStartup:        app.startup,
 		Bind: []interface{}{
 			app,
 		},
 	})
-
 	if err != nil {
-		println("Error:", err.Error())
+		println("wails error:", err.Error())
 	}
 }
