@@ -258,5 +258,35 @@
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
 }
 
-.signin .btn.primary { width: 100%; padding: 9px; font-size: 14px; }
-.signin-endpoint { font-size: 11px; color: var(--text-subtle); margin: 14px 0 0; }
+.signin-card { text-align: left; }
+.signin-card .brand-mark { margin: 0 auto 14px; }
+.signin-card h2 { text-align: center; }
+.signin-card .signin-help { text-align: center; }
+
+.form-group { margin-bottom: 14px; }
+.form-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  margin-bottom: 4px;
+}
+.form-hint {
+  font-size: 11px;
+  color: var(--text-subtle);
+  margin: 4px 0 0;
+}
+.folder-input {
+  margin-bottom: 0;
+  flex: 1;
+  min-width: 0;
+}
+.connect-btn { width: 100%; padding: 9px; font-size: 14px; margin-top: 4px; }
+.signin-endpoint {
+  font-size: 11px;
+  color: var(--text-subtle);
+  margin: 14px 0 0;
+  text-align: center;
+}

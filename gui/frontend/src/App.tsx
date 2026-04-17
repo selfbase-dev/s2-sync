@@ -10,6 +10,12 @@ import {
   Endpoint,
   IsAutostartEnabled,
   SetAutostart,
+  DefaultFolder,
+  SavedFolder,
+  SetSavedFolder,
+  EnsureFolder,
+  OpenFolder,
+  ConfirmDisconnect,
 } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
 import "./App.css";
@@ -31,13 +37,18 @@ interface Event {
 
 const MAX_LOG_LINES = 200;
 
+const STATUS_LABEL: Record<Status, string> = {
+  idle: "Idle",
+  running: "Syncing",
+  stopping: "Stopping…",
+  error: "Error",
+};
+
 function App() {
   const [endpoint, setEndpoint] = useState("");
   const [hasToken, setHasToken] = useState<boolean | null>(null);
-  const [tokenInput, setTokenInput] = useState("");
-  const [tokenError, setTokenError] = useState("");
-  const [savingToken, setSavingToken] = useState(false);
   const [folder, setFolder] = useState("");
+  const [defaultFolder, setDefaultFolder] = useState("");
   const [state, setState] = useState<StateInfo>({ status: "idle" });
   const [logs, setLogs] = useState<Event[]>([]);
   const [autostart, setAutostartState] = useState(false);
@@ -45,8 +56,12 @@ function App() {
 
   useEffect(() => {
     Endpoint().then(setEndpoint);
-    HasToken().then(setHasToken);
+    DefaultFolder().then(setDefaultFolder);
     IsAutostartEnabled().then(setAutostartState);
+    Promise.all([HasToken(), SavedFolder()]).then(([hasTok, saved]) => {
+      setHasToken(hasTok);
+      if (saved) setFolder(saved);
+    });
     GetStatus().then((s) => {
       setState(s as StateInfo);
       if (s.mount?.path) setFolder(s.mount.path);
@@ -69,29 +84,6 @@ function App() {
     }
   }, [logs]);
 
-  const handleSaveToken = async () => {
-    if (!tokenInput || savingToken) return;
-    setTokenError("");
-    setSavingToken(true);
-    try {
-      await SaveToken(tokenInput);
-      setTokenInput("");
-      setHasToken(true);
-    } catch (e: any) {
-      setTokenError(String(e?.message ?? e));
-    } finally {
-      setSavingToken(false);
-    }
-  };
-
-  const handleClearToken = async () => {
-    await ClearToken();
-    setHasToken(false);
-    setFolder("");
-    setState({ status: "idle" });
-    setLogs([]);
-  };
-
   const handlePickFolder = async () => {
     const f = await PickFolder();
     if (f) setFolder(f);
@@ -100,6 +92,7 @@ function App() {
   const handleStart = async () => {
     if (!folder) return;
     try {
+      await EnsureFolder(folder);
       await StartSync(folder);
     } catch (e: any) {
       setState({ status: "error", error: String(e?.message ?? e) });
@@ -114,59 +107,42 @@ function App() {
     try {
       await SetAutostart(next);
       setAutostartState(next);
-    } catch (e) {
-      // fall through; checkbox stays at current value
+    } catch {
+      // checkbox stays at current value
     }
   };
 
-  // ---- Sign-in screen ----
+  const handleDisconnect = async () => {
+    const ok = await ConfirmDisconnect();
+    if (!ok) return;
+    await ClearToken();
+    setHasToken(false);
+    setFolder("");
+    setState({ status: "idle" });
+    setLogs([]);
+  };
+
   if (hasToken === null) {
     return <div className="app" />;
   }
 
   if (!hasToken) {
     return (
-      <div className="signin">
-        <div className="signin-card">
-          <div className="brand-mark">S2</div>
-          <h2>Connect to S2</h2>
-          <p className="signin-help">
-            Paste an API token from your S2 dashboard to start syncing.
-            Tokens begin with <code>s2_</code>.
-          </p>
-          <input
-            type="password"
-            className="token-input"
-            placeholder="s2_..."
-            value={tokenInput}
-            onChange={(e) => setTokenInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleSaveToken()}
-            autoFocus
-          />
-          <button
-            className="btn primary"
-            onClick={handleSaveToken}
-            disabled={!tokenInput || savingToken}
-          >
-            {savingToken ? "Verifying…" : "Connect"}
-          </button>
-          {tokenError && <div className="error-banner">{tokenError}</div>}
-          <p className="signin-endpoint">{endpoint}</p>
-        </div>
-      </div>
+      <Welcome
+        endpoint={endpoint}
+        defaultFolder={defaultFolder}
+        initialFolder={folder || defaultFolder}
+        onConnected={(f) => {
+          setHasToken(true);
+          setFolder(f);
+        }}
+      />
     );
   }
 
-  // ---- Main screen ----
   const status = state.status;
   const running = status === "running";
   const stopping = status === "stopping";
-  const statusText: Record<Status, string> = {
-    idle: "Idle",
-    running: "Syncing",
-    stopping: "Stopping…",
-    error: "Error",
-  };
   const lastSync = state.lastSync
     ? new Date(state.lastSync).toLocaleTimeString()
     : null;
@@ -183,8 +159,9 @@ function App() {
         </div>
         <button
           className="icon-btn"
-          onClick={handleClearToken}
+          onClick={handleDisconnect}
           title="Disconnect"
+          aria-label="Disconnect"
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <path
@@ -202,7 +179,7 @@ function App() {
         <div className="card status-card">
           <div className={`status-dot ${status}`} />
           <div className="status-info">
-            <div className="status-label">{statusText[status]}</div>
+            <div className="status-label">{STATUS_LABEL[status]}</div>
             <div className="status-meta">
               {lastSync ? `Last sync ${lastSync}` : "Not synced yet"}
             </div>
@@ -239,10 +216,19 @@ function App() {
               </div>
               <button
                 className="btn"
+                onClick={() => folder && OpenFolder(folder)}
+                disabled={!folder}
+                title="Open in Finder"
+              >
+                Open
+              </button>
+              <button
+                className="btn"
                 onClick={handlePickFolder}
                 disabled={running || stopping}
+                title="Choose a different folder"
               >
-                Choose…
+                Change
               </button>
             </div>
           </div>
@@ -265,7 +251,10 @@ function App() {
         <div className="card">
           <div className="card-header">Activity</div>
           <div className="card-body">
-            <div className={`activity ${logs.length === 0 ? "empty" : ""}`} ref={activityRef}>
+            <div
+              className={`activity ${logs.length === 0 ? "empty" : ""}`}
+              ref={activityRef}
+            >
               {logs.length === 0
                 ? "(no events yet)"
                 : logs.map((e, i) => (
@@ -273,16 +262,108 @@ function App() {
                       <span className="activity-time">
                         {new Date(e.time).toLocaleTimeString()}
                       </span>
-                      <span className={`activity-type ${e.type}`}>
-                        {e.type}
-                      </span>
-                      {" "}
+                      <span className={`activity-type ${e.type}`}>{e.type}</span>{" "}
                       {e.message ?? ""}
                     </span>
                   ))}
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+interface WelcomeProps {
+  endpoint: string;
+  defaultFolder: string;
+  initialFolder: string;
+  onConnected: (folder: string) => void;
+}
+
+function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }: WelcomeProps) {
+  const [token, setToken] = useState("");
+  const [folder, setFolder] = useState(initialFolder);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setFolder(initialFolder);
+  }, [initialFolder]);
+
+  const pickFolder = async () => {
+    const f = await PickFolder();
+    if (f) setFolder(f);
+  };
+
+  const connect = async () => {
+    if (!token || busy) return;
+    setError("");
+    setBusy(true);
+    try {
+      const folderPath = folder || defaultFolder;
+      await SaveToken(token);
+      await EnsureFolder(folderPath);
+      await SetSavedFolder(folderPath);
+      await StartSync(folderPath);
+      onConnected(folderPath);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="signin">
+      <div className="signin-card">
+        <div className="brand-mark">S2</div>
+        <h2>Welcome to s2sync</h2>
+        <p className="signin-help">
+          Sync a folder with S2. Get an API token from your S2 dashboard.
+        </p>
+
+        <div className="form-group">
+          <label className="form-label">Token</label>
+          <input
+            type="password"
+            className="token-input"
+            placeholder="s2_..."
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && connect()}
+            autoFocus
+          />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Folder</label>
+          <div className="folder-row">
+            <input
+              type="text"
+              className="token-input folder-input"
+              placeholder={defaultFolder}
+              value={folder}
+              onChange={(e) => setFolder(e.target.value)}
+            />
+            <button className="btn" onClick={pickFolder} disabled={busy}>
+              Choose…
+            </button>
+          </div>
+          <p className="form-hint">
+            Files in this folder will sync. Created if it doesn't exist.
+          </p>
+        </div>
+
+        <button
+          className="btn primary connect-btn"
+          onClick={connect}
+          disabled={!token || busy}
+        >
+          {busy ? "Connecting…" : "Connect & start sync"}
+        </button>
+        {error && <div className="error-banner">{error}</div>}
+        <p className="signin-endpoint">{endpoint}</p>
       </div>
     </div>
   );

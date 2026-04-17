@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/auth"
@@ -11,6 +13,18 @@ import (
 	"github.com/selfbase-dev/s2-sync/internal/service"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// openInFileManager reveals path in the OS file manager.
+func openInFileManager(path string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", path).Start()
+	case "windows":
+		return exec.Command("explorer", path).Start()
+	default:
+		return exec.Command("xdg-open", path).Start()
+	}
+}
 
 type App struct {
 	ctx     context.Context
@@ -32,6 +46,24 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	go a.forwardEvents()
+	go a.maybeAutoResume()
+}
+
+// maybeAutoResume kicks off sync at launch when both a token and a
+// saved folder are present. Keeps the "open the app and it just works"
+// expectation; users explicitly Stop if they want to pause.
+func (a *App) maybeAutoResume() {
+	if !a.HasToken() {
+		return
+	}
+	folder := a.SavedFolder()
+	if folder == "" {
+		return
+	}
+	if _, err := os.Stat(folder); err != nil {
+		return
+	}
+	_ = a.svc.Start(a.ctx, service.Mount{Path: folder})
 }
 
 // forwardEvents pumps service events out to the frontend via Wails
@@ -79,8 +111,67 @@ func (a *App) PickFolder() (string, error) {
 	})
 }
 
-// StartSync begins watching the given folder.
+// OpenFolder reveals the given path in Finder / Explorer / file manager.
+func (a *App) OpenFolder(path string) error {
+	if path == "" {
+		return nil
+	}
+	return openInFileManager(path)
+}
+
+// EnsureFolder creates the directory if it doesn't exist (used during
+// first-run Connect to materialize the default `~/S2` placeholder).
+func (a *App) EnsureFolder(path string) error {
+	return os.MkdirAll(path, 0o755)
+}
+
+// ConfirmDisconnect shows a native Yes/No dialog and reports the choice.
+func (a *App) ConfirmDisconnect() (bool, error) {
+	res, err := wailsruntime.MessageDialog(a.ctx, wailsruntime.MessageDialogOptions{
+		Type:          wailsruntime.QuestionDialog,
+		Title:         "Disconnect from S2?",
+		Message:       "Stop syncing and remove the saved token from this device. Your files are not deleted.",
+		Buttons:       []string{"Disconnect", "Cancel"},
+		DefaultButton: "Cancel",
+		CancelButton:  "Cancel",
+	})
+	if err != nil {
+		return false, err
+	}
+	return res == "Disconnect", nil
+}
+
+// DefaultFolder returns the suggested folder shown as a placeholder
+// for new users (see service.DefaultMountPath).
+func (a *App) DefaultFolder() string {
+	return service.DefaultMountPath()
+}
+
+// SavedFolder returns the previously configured folder (or "" if none).
+func (a *App) SavedFolder() string {
+	c, err := service.LoadConfig()
+	if err != nil || c == nil {
+		return ""
+	}
+	return c.MountPath
+}
+
+// SetSavedFolder persists the user's chosen sync folder.
+func (a *App) SetSavedFolder(path string) error {
+	c, err := service.LoadConfig()
+	if err != nil {
+		c = &service.Config{}
+	}
+	c.MountPath = path
+	return service.SaveConfig(c)
+}
+
+// StartSync begins watching the given folder, persisting the choice
+// so it auto-loads on next launch.
 func (a *App) StartSync(folder string) error {
+	if err := a.SetSavedFolder(folder); err != nil {
+		return fmt.Errorf("save folder: %w", err)
+	}
 	return a.svc.Start(a.ctx, service.Mount{Path: folder})
 }
 
