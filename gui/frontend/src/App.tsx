@@ -8,6 +8,8 @@ import {
   StopSync,
   GetStatus,
   Endpoint,
+  IsAutostartEnabled,
+  SetAutostart,
 } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
 import "./App.css";
@@ -38,11 +40,13 @@ function App() {
   const [folder, setFolder] = useState("");
   const [state, setState] = useState<StateInfo>({ status: "idle" });
   const [logs, setLogs] = useState<Event[]>([]);
+  const [autostart, setAutostartState] = useState(false);
   const activityRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     Endpoint().then(setEndpoint);
     HasToken().then(setHasToken);
+    IsAutostartEnabled().then(setAutostartState);
     GetStatus().then((s) => {
       setState(s as StateInfo);
       if (s.mount?.path) setFolder(s.mount.path);
@@ -104,6 +108,15 @@ function App() {
 
   const handleStop = async () => {
     await StopSync();
+  };
+
+  const handleAutostart = async (next: boolean) => {
+    try {
+      await SetAutostart(next);
+      setAutostartState(next);
+    } catch (e) {
+      // fall through; checkbox stays at current value
+    }
   };
 
   // ---- Sign-in screen ----
@@ -232,6 +245,20 @@ function App() {
                 Choose…
               </button>
             </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-header">Preferences</div>
+          <div className="card-body">
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={autostart}
+                onChange={(e) => handleAutostart(e.target.checked)}
+              />
+              <span>Start s2sync at login</span>
+            </label>
           </div>
         </div>
 

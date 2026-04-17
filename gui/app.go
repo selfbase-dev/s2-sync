@@ -32,7 +32,6 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	go a.forwardEvents()
-	go runTray(a)
 }
 
 // forwardEvents pumps service events out to the frontend via Wails

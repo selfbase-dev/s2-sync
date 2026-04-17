@@ -164,6 +164,16 @@
 .btn.danger { color: var(--error); }
 .btn.danger:hover:not(:disabled) { background: rgba(220, 38, 38, 0.08); }
 
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+.check-row input { margin: 0; }
+
 .error-banner {
   background: rgba(220, 38, 38, 0.1);
   border: 1px solid rgba(220, 38, 38, 0.2);

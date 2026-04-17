@@ -3,7 +3,6 @@ module github.com/selfbase-dev/s2-sync
 go 1.26.1
 
 require (
-	fyne.io/systray v1.12.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/spf13/cobra v1.10.2
