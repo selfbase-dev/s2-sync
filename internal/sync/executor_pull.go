@@ -92,12 +92,8 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(localPath)
-	if err != nil {
-		return err
-	}
 
-	state.RecordFile(relPath, hash, dl.ContentVersion, info.Size(), downloadedRevisionID)
+	state.RecordFile(relPath, hash, dl.ContentVersion, downloadedRevisionID)
 	return nil
 }
 

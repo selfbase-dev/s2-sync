@@ -4,87 +4,148 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/selfbase-dev/s2-cli/internal/types"
 )
 
-func TestLoadState_NoFile(t *testing.T) {
+var testIdentity = Identity{
+	Endpoint: "https://s2.example",
+	UserID:   "user_test",
+	BasePath: "/",
+}
+
+func TestLoadState_NoDB(t *testing.T) {
 	dir := t.TempDir()
-	state, err := LoadState(dir)
+	state, err := LoadState(dir, testIdentity)
 	if err != nil {
 		t.Fatalf("LoadState() error: %v", err)
 	}
-	if state.Version != currentStateVersion {
-		t.Errorf("Version = %d, want %d", state.Version, currentStateVersion)
-	}
+	defer state.Close()
+
 	if state.Cursor != "" {
 		t.Errorf("Cursor = %q, want empty", state.Cursor)
 	}
 	if state.Files == nil {
 		t.Error("Files should be initialized")
 	}
-}
-
-func TestLoadState_CorruptJSON(t *testing.T) {
-	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, ".s2"), 0700)
-	os.WriteFile(filepath.Join(dir, ".s2", "state.json"), []byte("{bad"), 0600)
-
-	state, err := LoadState(dir)
-	if err != nil {
-		t.Fatalf("LoadState() error: %v", err)
-	}
-	if state.Version != currentStateVersion {
-		t.Errorf("Version = %d", state.Version)
-	}
 	if len(state.Files) != 0 {
-		t.Errorf("Files len = %d", len(state.Files))
+		t.Errorf("Files len = %d, want 0", len(state.Files))
 	}
 }
 
-func TestSaveState_RoundTrip(t *testing.T) {
+func TestLoadState_CorruptDB(t *testing.T) {
 	dir := t.TempDir()
-	state := &State{
-		Cursor:     "opaque_cursor",
-		PushedSeqs: []int64{10, 20},
-		Files: map[string]types.FileState{
-			"readme.md": {LocalHash: "sha256hash", ContentVersion: 42, Size: 1024},
-		},
+	if err := os.MkdirAll(filepath.Join(dir, ".s2"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(DBPath(dir), []byte("not a sqlite file"), 0600); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := SaveState(dir, state); err != nil {
-		t.Fatalf("SaveState() error: %v", err)
-	}
-
-	loaded, err := LoadState(dir)
+	state, err := LoadState(dir, testIdentity)
 	if err != nil {
 		t.Fatalf("LoadState() error: %v", err)
 	}
+	defer state.Close()
+
+	if len(state.Files) != 0 {
+		t.Errorf("Files len = %d after corrupt load, want 0", len(state.Files))
+	}
+
+	// Old DB should have been quarantined.
+	entries, _ := filepath.Glob(DBPath(dir) + ".corrupt.*")
+	if len(entries) == 0 {
+		t.Error("expected quarantined .corrupt directory to exist")
+	}
+}
+
+func TestSaveAndReload_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	state, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+
+	state.Cursor = "opaque_cursor"
+	state.RecordFile("readme.md", "sha256hash", 42, "rev_1")
+	state.AddPushedSeq(10)
+	state.AddPushedSeq(20)
+
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	loaded, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatalf("LoadState (reload): %v", err)
+	}
+	defer loaded.Close()
+
 	if loaded.Cursor != "opaque_cursor" {
 		t.Errorf("Cursor = %q", loaded.Cursor)
 	}
-	if len(loaded.PushedSeqs) != 2 {
-		t.Errorf("PushedSeqs = %v", loaded.PushedSeqs)
+	if fs, ok := loaded.Files["readme.md"]; !ok || fs.ContentVersion != 42 || fs.RevisionID != "rev_1" {
+		t.Errorf("Files[readme.md] = %+v ok=%v", fs, ok)
 	}
-	if fs := loaded.Files["readme.md"]; fs.ContentVersion != 42 {
-		t.Errorf("ContentVersion = %d", fs.ContentVersion)
-	}
-	// SyncedAt should be set automatically
-	if loaded.SyncedAt == "" {
-		t.Error("SyncedAt should be set")
+	if !loaded.IsPushedSeq(10) || !loaded.IsPushedSeq(20) {
+		t.Error("pushed seqs were not persisted")
 	}
 }
 
-func TestSaveState_NoTmpFileRemains(t *testing.T) {
+func TestLoadState_IdentityMismatchResets(t *testing.T) {
 	dir := t.TempDir()
-	SaveState(dir, &State{Files: map[string]types.FileState{}})
-	if _, err := os.Stat(StatePath(dir) + ".tmp"); !os.IsNotExist(err) {
-		t.Error("tmp file should not remain")
+	state, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	state.Cursor = "stale-cursor"
+	state.RecordFile("keep-me.txt", "h", 1, "")
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	state.Close()
+
+	// Reopen with a different identity → archive must be dropped.
+	otherIdentity := Identity{Endpoint: "https://other.example", UserID: "user_other", BasePath: "/"}
+	reloaded, err := LoadState(dir, otherIdentity)
+	if err != nil {
+		t.Fatalf("LoadState (new identity): %v", err)
+	}
+	defer reloaded.Close()
+
+	if reloaded.Cursor != "" {
+		t.Errorf("Cursor = %q after identity mismatch, want empty", reloaded.Cursor)
+	}
+	if len(reloaded.Files) != 0 {
+		t.Errorf("Files len = %d after identity mismatch, want 0", len(reloaded.Files))
+	}
+	if reloaded.IsPushedSeq(0) {
+		t.Error("pushed seqs should be cleared on identity mismatch")
+	}
+}
+
+func TestLoadState_DoubleLockFails(t *testing.T) {
+	dir := t.TempDir()
+	state, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	defer state.Close()
+
+	if _, err := LoadState(dir, testIdentity); err == nil {
+		t.Fatal("second LoadState should fail on held lock")
 	}
 }
 
 func TestPushedSeqs_AddAndCheck(t *testing.T) {
-	s := newEmptyState()
+	dir := t.TempDir()
+	s, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
 	s.AddPushedSeq(10)
 	s.AddPushedSeq(20)
 
@@ -97,42 +158,32 @@ func TestPushedSeqs_AddAndCheck(t *testing.T) {
 }
 
 func TestRecordFile(t *testing.T) {
-	s := newEmptyState()
-	s.RecordFile("docs/a.txt", "h1", 42, 1024, "rev_1")
+	dir := t.TempDir()
+	s, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.RecordFile("docs/a.txt", "h1", 42, "rev_1")
 
 	fs, ok := s.Files["docs/a.txt"]
 	if !ok {
 		t.Fatal("expected docs/a.txt in Files")
 	}
-	if fs.LocalHash != "h1" {
-		t.Errorf("LocalHash = %q, want h1", fs.LocalHash)
-	}
-	if fs.ContentVersion != 42 {
-		t.Errorf("ContentVersion = %d, want 42", fs.ContentVersion)
-	}
-	if fs.Size != 1024 {
-		t.Errorf("Size = %d, want 1024", fs.Size)
-	}
-	if fs.RevisionID != "rev_1" {
-		t.Errorf("RevisionID = %q, want rev_1", fs.RevisionID)
-	}
-	if fs.SyncedAt == "" {
-		t.Error("SyncedAt should be set")
-	}
-}
-
-func TestRecordFile_EmptyRevisionID(t *testing.T) {
-	s := newEmptyState()
-	s.RecordFile("file.txt", "h2", 1, 100, "")
-
-	fs := s.Files["file.txt"]
-	if fs.RevisionID != "" {
-		t.Errorf("RevisionID = %q, want empty", fs.RevisionID)
+	if fs.LocalHash != "h1" || fs.ContentVersion != 42 || fs.RevisionID != "rev_1" {
+		t.Errorf("FileState = %+v", fs)
 	}
 }
 
 func TestPushedSeqs_Prune(t *testing.T) {
-	s := newEmptyState()
+	dir := t.TempDir()
+	s, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
 	s.AddPushedSeq(10)
 	s.AddPushedSeq(20)
 	s.AddPushedSeq(30)
@@ -147,5 +198,9 @@ func TestPushedSeqs_Prune(t *testing.T) {
 	}
 	if !s.IsPushedSeq(30) {
 		t.Error("30 should remain")
+	}
+
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
 }

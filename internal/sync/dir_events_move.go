@@ -11,14 +11,17 @@ import (
 
 // expandArchiveMove renames archive keys and local files from `from`
 // prefix to `to` prefix. Files whose local hash has drifted from the
-// archive are left in place as PreserveLocalRename conflicts.
+// archive are left in place as PreserveLocalRename conflicts. Archive
+// rows are moved via state so dirty tracking flushes them at Save.
 func expandArchiveMove(
-	archive map[string]types.FileState,
+	state *State,
 	localDir, fromPrefix, toPrefix string,
 ) ([]types.SyncPlan, bool, error) {
 	if fromPrefix == "" {
 		return nil, false, nil
 	}
+
+	archive := state.Files
 
 	type move struct {
 		oldKey, newKey string
@@ -56,7 +59,7 @@ func expandArchiveMove(
 				Path:   m.oldKey,
 				Action: types.PreserveLocalRename,
 			})
-			delete(archive, m.oldKey)
+			state.DeleteFile(m.oldKey)
 			continue
 		}
 
@@ -69,8 +72,7 @@ func expandArchiveMove(
 			}
 			mutated = true
 		}
-		delete(archive, m.oldKey)
-		archive[m.newKey] = fs
+		state.MoveFile(m.oldKey, m.newKey)
 	}
 
 	fsPaths, err := walkLocalUnderPrefix(localDir, fromPrefix)

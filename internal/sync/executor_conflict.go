@@ -59,12 +59,7 @@ func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string
 
 	if localHash != "" && localHash == remoteHash {
 		os.Remove(tmpPath)
-		info, _ := os.Stat(localPath)
-		size := int64(0)
-		if info != nil {
-			size = info.Size()
-		}
-		state.RecordFile(relPath, localHash, dl.ContentVersion, size, downloadedRevisionID)
+		state.RecordFile(relPath, localHash, dl.ContentVersion, downloadedRevisionID)
 		fmt.Printf("verified: %s (identical)\n", relPath)
 		return nil
 	}
@@ -87,7 +82,7 @@ func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, s
 	if err != nil {
 		if os.IsNotExist(err) {
 			fmt.Printf("conflict (local deleted, remote saved): %s\n", relPath)
-			delete(state.Files, relPath)
+			state.DeleteFile(relPath)
 			return nil
 		}
 		return err
@@ -108,12 +103,8 @@ func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, s
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(localPath)
-	if err != nil {
-		return err
-	}
 
-	state.RecordFile(relPath, hash, cv, info.Size(), "")
+	state.RecordFile(relPath, hash, cv, "")
 	return nil
 }
 
@@ -122,7 +113,7 @@ func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, s
 func executePreserveLocalRename(localPath, relPath string, state *State) error {
 	if _, err := os.Stat(localPath); err != nil {
 		if os.IsNotExist(err) {
-			delete(state.Files, relPath)
+			state.DeleteFile(relPath)
 			fmt.Printf("preserved (already gone): %s\n", relPath)
 			return nil
 		}
@@ -132,7 +123,7 @@ func executePreserveLocalRename(localPath, relPath string, state *State) error {
 	if err := os.Rename(localPath, conflictPath); err != nil {
 		return err
 	}
-	delete(state.Files, relPath)
+	state.DeleteFile(relPath)
 	fmt.Printf("preserved local as %s: %s\n", filepath.Base(conflictPath), relPath)
 	return nil
 }

@@ -31,7 +31,7 @@ func (o SyncOptions) errorf(format string, a ...any) {
 // RunInitialSync orchestrates a full initial sync: clear archive, walk
 // local, bootstrap remote (ADR 0046), compare, execute, persist state.
 func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *State, opts SyncOptions) error {
-	state.Files = make(map[string]types.FileState)
+	state.ClearFiles()
 
 	exclude := LoadExclude(localDir)
 	localFiles, err := Walk(localDir, state.Files, exclude)
@@ -44,7 +44,7 @@ func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *Stat
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
 
-	prefilled := PrefillArchiveForIdempotentApply(state.Files, localFiles, remoteFiles)
+	prefilled := PrefillArchiveForIdempotentApply(state, localFiles, remoteFiles)
 	opts.printf("Local: %d files, Remote: %d files (%d already in sync)\n",
 		len(localFiles), len(remoteFiles), prefilled)
 
@@ -61,7 +61,7 @@ func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *Stat
 	}
 
 	if !opts.DryRun {
-		if err := SaveState(localDir, state); err != nil {
+		if err := state.Save(); err != nil {
 			return fmt.Errorf("failed to save state: %w", err)
 		}
 	}
@@ -104,7 +104,7 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 		}
 	}
 
-	dirOutcome, err := HandleIncrementalDirEvents(c, localDir, state.Files, dirChanges)
+	dirOutcome, err := HandleIncrementalDirEvents(c, localDir, state, dirChanges)
 	if err != nil {
 		return fmt.Errorf("dir event handling: %w", err)
 	}
@@ -144,7 +144,7 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 	}
 
 	if !opts.DryRun {
-		if err := SaveState(localDir, state); err != nil {
+		if err := state.Save(); err != nil {
 			return fmt.Errorf("failed to save state: %w", err)
 		}
 	}

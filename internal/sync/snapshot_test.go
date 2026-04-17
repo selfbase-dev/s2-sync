@@ -50,7 +50,7 @@ func TestSnapshotToRemoteFiles_EmptyAndRootPaths(t *testing.T) {
 }
 
 func TestPrefillArchiveForIdempotentApply_FillsMatches(t *testing.T) {
-	archive := map[string]types.FileState{}
+	state := testStateFromArchive(nil)
 	local := map[string]types.LocalFile{
 		"docs/a.txt":  {Hash: "h-a", Size: 10},
 		"docs/b.txt":  {Hash: "h-b", Size: 20},
@@ -62,25 +62,29 @@ func TestPrefillArchiveForIdempotentApply_FillsMatches(t *testing.T) {
 		"docs/remote.md": {Hash: "h-r", RevisionID: "rev_r", ContentVersion: 1},
 	}
 
-	added := PrefillArchiveForIdempotentApply(archive, local, remote)
+	added := PrefillArchiveForIdempotentApply(state, local, remote)
 	if added != 1 {
 		t.Fatalf("added = %d, want 1 (only docs/a.txt hashes match)", added)
 	}
-	if _, ok := archive["docs/a.txt"]; !ok {
+	if _, ok := state.Files["docs/a.txt"]; !ok {
 		t.Errorf("docs/a.txt should be in archive after prefill")
 	}
-	if _, ok := archive["docs/b.txt"]; ok {
+	if _, ok := state.Files["docs/b.txt"]; ok {
 		t.Errorf("docs/b.txt should NOT be in archive (hash differs)")
 	}
-	if _, ok := archive["docs/new.md"]; ok {
+	if _, ok := state.Files["docs/new.md"]; ok {
 		t.Errorf("docs/new.md should NOT be in archive (no remote entry)")
+	}
+	// Dirty tracking must flag the newly added row so Save persists it.
+	if _, dirty := state.dirty["docs/a.txt"]; !dirty {
+		t.Errorf("docs/a.txt should be marked dirty after prefill")
 	}
 }
 
 func TestPrefillArchiveForIdempotentApply_DoesNotOverwriteExisting(t *testing.T) {
-	archive := map[string]types.FileState{
+	state := testStateFromArchive(map[string]types.FileState{
 		"docs/a.txt": {LocalHash: "h-old", ContentVersion: 1},
-	}
+	})
 	local := map[string]types.LocalFile{
 		"docs/a.txt": {Hash: "h-a"},
 	}
@@ -88,17 +92,17 @@ func TestPrefillArchiveForIdempotentApply_DoesNotOverwriteExisting(t *testing.T)
 		"docs/a.txt": {Hash: "h-a", ContentVersion: 5},
 	}
 
-	added := PrefillArchiveForIdempotentApply(archive, local, remote)
+	added := PrefillArchiveForIdempotentApply(state, local, remote)
 	if added != 0 {
 		t.Fatalf("added = %d, want 0 (archive entry already exists)", added)
 	}
-	if archive["docs/a.txt"].LocalHash != "h-old" {
+	if state.Files["docs/a.txt"].LocalHash != "h-old" {
 		t.Errorf("existing archive entry was overwritten")
 	}
 }
 
 func TestPrefillArchiveForIdempotentApply_SkipsEmptyRemoteHash(t *testing.T) {
-	archive := map[string]types.FileState{}
+	state := testStateFromArchive(nil)
 	local := map[string]types.LocalFile{
 		"docs/a.txt": {Hash: "h-a"},
 	}
@@ -108,7 +112,7 @@ func TestPrefillArchiveForIdempotentApply_SkipsEmptyRemoteHash(t *testing.T) {
 		"docs/a.txt": {Hash: "", ContentVersion: 1},
 	}
 
-	added := PrefillArchiveForIdempotentApply(archive, local, remote)
+	added := PrefillArchiveForIdempotentApply(state, local, remote)
 	if added != 0 {
 		t.Errorf("added = %d, want 0 (empty remote hash must not match)", added)
 	}
