@@ -17,6 +17,7 @@ func TestDefaultExclude(t *testing.T) {
 		"._.DS_Store",                            // macOS
 		".s2",                                    // hard exclude
 		".s2/state.json",                         // hard exclude
+		".s2ignore",                              // hard exclude (local config)
 		"file.sync-conflict-20260101-120000.txt", // hard exclude
 	}
 
@@ -169,5 +170,11 @@ func TestHardExcludes_CannotBeOverridden(t *testing.T) {
 	// .sync-conflict-* is always excluded
 	if !exclude("doc.sync-conflict-20260101-120000.txt") {
 		t.Error("sync-conflict files should always be excluded")
+	}
+
+	// .s2ignore is always excluded — it's local-only config and should
+	// not propagate across devices (Syncthing/.stignore convention).
+	if !exclude(".s2ignore") {
+		t.Error(".s2ignore should always be excluded")
 	}
 }

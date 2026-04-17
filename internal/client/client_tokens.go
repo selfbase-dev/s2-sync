@@ -25,7 +25,7 @@ func (c *Client) CreateToken(name, basePath string, canDelegate bool, accessPath
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequest("POST", c.url("/api/tokens"), bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(c.reqContext(), "POST", c.url("/api/tokens"), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

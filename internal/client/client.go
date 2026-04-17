@@ -32,6 +32,7 @@ type Client struct {
 	endpoint   string
 	token      string
 	httpClient *http.Client
+	ctx        context.Context
 }
 
 // New creates a new S2 client.
@@ -55,7 +56,24 @@ func New(endpoint, token string) *Client {
 		endpoint:   strings.TrimRight(endpoint, "/"),
 		token:      token,
 		httpClient: retryClient.StandardClient(),
+		ctx:        context.Background(),
 	}
+}
+
+// WithContext returns a shallow copy of the client that attaches ctx to
+// every outgoing HTTP request. Cancelling ctx aborts in-flight requests,
+// which is how the desktop service unblocks a slow sync on Stop.
+func (c *Client) WithContext(ctx context.Context) *Client {
+	clone := *c
+	clone.ctx = ctx
+	return &clone
+}
+
+func (c *Client) reqContext() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
 }
 
 func (c *Client) setAuth(req *http.Request) {
@@ -97,7 +115,7 @@ func readErrorBody(resp *http.Response) string {
 
 // Me returns the auth context for the current token.
 func (c *Client) Me() (*types.MeTokenResponse, error) {
-	req, err := http.NewRequest("GET", c.url("/api/me"), nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "GET", c.url("/api/me"), nil)
 	if err != nil {
 		return nil, err
 	}

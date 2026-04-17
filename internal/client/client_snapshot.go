@@ -17,7 +17,7 @@ func (c *Client) Snapshot(path string) (*types.SnapshotResponse, error) {
 		reqURL += "?path=" + neturl.QueryEscape(path)
 	}
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func (c *Client) Snapshot(path string) (*types.SnapshotResponse, error) {
 
 // DownloadRevision downloads file content by revision id.
 func (c *Client) DownloadRevision(revisionID string) (*DownloadResult, error) {
-	req, err := http.NewRequest("GET", c.url("/api/revisions/"+neturl.PathEscape(revisionID)), nil)
+	req, err := http.NewRequestWithContext(c.reqContext(), "GET", c.url("/api/revisions/"+neturl.PathEscape(revisionID)), nil)
 	if err != nil {
 		return nil, err
 	}

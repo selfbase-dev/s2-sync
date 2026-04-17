@@ -31,8 +31,12 @@ var defaultExcludes = []string{
 // isHardExcluded checks paths that are always excluded regardless of .s2ignore.
 func isHardExcluded(rel string) bool {
 	base := filepath.Base(rel)
-	// .s2 directory
+	// .s2 directory (sync state)
 	if base == ".s2" || rel == ".s2" || strings.HasPrefix(rel, ".s2/") {
+		return true
+	}
+	// .s2ignore — local exclude config, must not propagate across devices
+	if rel == ".s2ignore" {
 		return true
 	}
 	// .sync-conflict-* files
