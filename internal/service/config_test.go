@@ -8,12 +8,16 @@ import (
 
 // withConfigDir redirects os.UserConfigDir() (which ConfigPath consults
 // via the XDG / Apple-standard fallback) at a tmp directory for the
-// duration of the test.
+// duration of the test. On Windows, os.UserConfigDir reads %APPDATA%;
+// os.UserHomeDir reads %USERPROFILE%. Set all three so tests are stable
+// across platforms.
 func withConfigDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)        // Linux
-	t.Setenv("HOME", dir)                   // macOS uses ~/Library/Application Support via HOME
+	t.Setenv("XDG_CONFIG_HOME", dir) // Linux
+	t.Setenv("HOME", dir)            // macOS + Linux fallback for UserHomeDir
+	t.Setenv("APPDATA", dir)         // Windows UserConfigDir source
+	t.Setenv("USERPROFILE", dir)     // Windows UserHomeDir source
 	return dir
 }
 
@@ -80,7 +84,10 @@ func TestSaveAtomic(t *testing.T) {
 
 func TestDefaultMountPathInsideHome(t *testing.T) {
 	home := t.TempDir()
+	// os.UserHomeDir consults HOME on unix and USERPROFILE on Windows.
+	// Set both so the test is portable across CI runners.
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	got := DefaultMountPath()
 	want := filepath.Join(home, "S2")
 	if got != want {
