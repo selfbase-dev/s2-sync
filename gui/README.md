@@ -1,19 +1,37 @@
-# README
+# s2sync GUI
 
-## About
+Wails (Go + React-TS) desktop frontend for s2-sync. Sits in the system tray, manages autostart, and drives the same sync engine as the `s2` CLI.
 
-This is the official Wails React-TS template.
+## Prerequisites
 
-You can configure the project by editing `wails.json`. More information about the project settings can be found
-here: https://wails.io/docs/reference/project-config
+- Go (version from `../go.mod`)
+- Node.js 20+
+- [Wails CLI](https://wails.io/docs/gettingstarted/installation) v2.12.0
+  ```sh
+  go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+  ```
+- **Linux only**: `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `pkg-config`
 
-## Live Development
+## Dev
 
-To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
-server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
-and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
-to this in your browser, and you can call your Go code from devtools.
+```sh
+wails dev
+```
 
-## Building
+Vite dev server with hot reload for the frontend. Go methods are callable from the browser devtools at http://localhost:34115.
 
-To build a redistributable, production mode package, use `wails build`.
+## Build
+
+```sh
+wails build                          # macOS / Windows
+wails build -tags webkit2_41         # Linux (WebKitGTK 4.1)
+```
+
+Output lands in `build/bin/`:
+- macOS: `s2sync.app`
+- Windows: `s2sync.exe`
+- Linux: `s2sync` binary
+
+## Release
+
+CI (`.github/workflows/release.yml`) runs the matrix build on tag push (`v*`) and uploads archives to GitHub Releases alongside the CLI. See the top-level [README](../README.md#release).

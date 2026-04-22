@@ -1,48 +1,79 @@
-# s2
+# s2-sync
 
-CLI for [S2](https://scopeds.dev) — bidirectional file sync with S2 remote storage.
+File sync client for [S2](https://scopeds.dev) storage.
+
+- **`s2`** — CLI (one-shot and watch-mode bidirectional sync)
+- **`s2sync`** — desktop GUI with system tray and autostart (macOS / Windows / Linux)
+
+> ⚠️ Alpha. Binaries are not yet code-signed. There is no auto-update — to upgrade, download a new release.
 
 ## Install
 
-Download a binary from [GitHub Releases](https://github.com/selfbase-dev/s2-sync/releases) and place it in your `PATH`.
+Grab the [latest release](https://github.com/selfbase-dev/s2-sync/releases/latest).
 
-## Usage
+### CLI
+
+| Platform | Asset |
+|---|---|
+| macOS (Apple Silicon) | `s2_darwin_arm64.tar.gz` |
+| macOS (Intel) | `s2_darwin_amd64.tar.gz` |
+| Linux x86_64 | `s2_linux_amd64.tar.gz` |
+| Linux arm64 | `s2_linux_arm64.tar.gz` |
+| Windows x86_64 | `s2_windows_amd64.zip` |
+| Windows arm64 | `s2_windows_arm64.zip` |
+
+Extract the archive and put `s2` on your `PATH`.
+
+### GUI
+
+| Platform | Asset | First launch |
+|---|---|---|
+| macOS (Apple Silicon) | `s2sync_darwin_arm64.zip` | Unzip, move `s2sync.app` to `/Applications`, **right-click → Open** once (unsigned) |
+| Windows x86_64 | `s2sync_windows_amd64.zip` | Unzip and run `s2sync.exe`. On SmartScreen: **More info → Run anyway** |
+| Linux x86_64 | `s2sync_linux_amd64.tar.gz` | Requires `libwebkit2gtk-4.1-0`. `tar -xzf` and run `./s2sync` |
+
+### Verify downloads
+
+Each release includes `checksums.txt`:
 
 ```sh
-# Authenticate
-s2 login
-
-# One-shot bidirectional sync
-s2 sync ./local-dir
-
-# Watch mode (continuous sync)
-s2 watch ./local-dir
+shasum -a 256 -c checksums.txt --ignore-missing
 ```
 
-The sync root is determined by the token's `base_path` — root or scoped, any token works the same way. To sync a different scope, issue a new token.
+On Windows: `Get-FileHash .\s2sync_windows_amd64.zip -Algorithm SHA256` and compare against the matching line in `checksums.txt`.
 
-Token can also be set via `S2_TOKEN` env var.
-
-Add a `.s2ignore` file to exclude patterns from sync.
-
-## Test
+## CLI usage
 
 ```sh
-# Unit tests
+s2 login                # interactive; or set S2_TOKEN
+s2 sync  ./local-dir    # one-shot bidirectional sync
+s2 watch ./local-dir    # continuous
+```
+
+The sync root is the token's `base_path` — root or scoped tokens both work. To sync a different scope, issue a new token. Add `.s2ignore` to exclude patterns.
+
+## Develop
+
+### CLI
+
+```sh
 go test ./...
 
-# E2E tests (requires running S2 server)
-S2_ENDPOINT=http://localhost:8888 S2_TOKEN=s2_xxx go test -tags e2e ./internal/sync/
+# E2E (needs a running S2 server; token must have can_delegate=true
+# and full read/write access)
+S2_ENDPOINT=http://localhost:8888 S2_TOKEN=s2_xxx \
+  go test -tags e2e ./internal/sync/
 ```
 
-**E2E requirements:**
-- `S2_TOKEN`: token with `can_delegate=true` and full read/write access (root or scoped — any scope works)
+### GUI
+
+See [gui/README.md](gui/README.md).
 
 ## Release
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-GitHub Actions runs GoReleaser on tag push and publishes binaries to GitHub Releases.
+GitHub Actions runs GoReleaser + a Wails build matrix on tag push and publishes all CLI and GUI artifacts (with aggregated `checksums.txt`) to GitHub Releases.
