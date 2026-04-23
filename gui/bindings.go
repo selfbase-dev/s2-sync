@@ -13,8 +13,17 @@ import (
 	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
 	"github.com/selfbase-dev/s2-sync/internal/service"
+	"github.com/selfbase-dev/s2-sync/internal/types"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// TokenScope is the scope summary returned by SaveToken so the UI can
+// show the user what the accepted token grants access to.
+type TokenScope struct {
+	BasePath    string             `json:"basePath"`
+	AccessPaths []types.AccessPath `json:"accessPaths"`
+	CanDelegate bool               `json:"canDelegate"`
+}
 
 // --- Auth ---
 
@@ -24,18 +33,27 @@ func (a *App) HasToken() bool {
 	return err == nil && t != ""
 }
 
-// SaveToken validates against /api/me and stores a token in the system
-// keyring.
-func (a *App) SaveToken(token string) error {
+// SaveToken validates against /api/me, stores the token in the system
+// keyring, and returns the token's scope so the UI can confirm what the
+// user just connected to.
+func (a *App) SaveToken(token string) (*TokenScope, error) {
 	token = strings.TrimSpace(token)
 	if !strings.HasPrefix(token, "s2_") {
-		return fmt.Errorf("invalid token: must start with s2_")
+		return nil, fmt.Errorf("invalid token: must start with s2_")
 	}
 	c := client.New(a.endpoint, token)
-	if _, err := c.Me(); err != nil {
-		return fmt.Errorf("token validation failed: %w", err)
+	me, err := c.Me()
+	if err != nil {
+		return nil, fmt.Errorf("token validation failed: %w", err)
 	}
-	return auth.SetKeyring(token)
+	if err := auth.SetKeyring(token); err != nil {
+		return nil, err
+	}
+	return &TokenScope{
+		BasePath:    me.BasePath,
+		AccessPaths: me.AccessPaths,
+		CanDelegate: me.CanDelegate,
+	}, nil
 }
 
 // ClearToken stops any running sync and removes the stored token.
@@ -76,7 +94,10 @@ func (a *App) OpenFolder(path string) error {
 // EnsureFolder creates the directory if it doesn't exist (used during
 // first-run Connect to materialize the default `~/S2` placeholder).
 func (a *App) EnsureFolder(path string) error {
-	return os.MkdirAll(path, 0o755)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return fmt.Errorf("could not create folder %q: %w", path, err)
+	}
+	return nil
 }
 
 // DefaultFolder returns the suggested folder shown as a placeholder

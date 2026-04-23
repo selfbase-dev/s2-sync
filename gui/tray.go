@@ -48,9 +48,9 @@ func onTrayReady(app *App) {
 	// block — build the menu and hand click handling to a goroutine,
 	// then return so the run loop keeps pumping.
 	systray.SetTitle("S2")
-	systray.SetTooltip("s2sync")
+	systray.SetTooltip("S2 Sync")
 
-	mShow := systray.AddMenuItem("Show window", "Open the s2sync window")
+	mShow := systray.AddMenuItem("Show window", "Open the S2 Sync window")
 	mStatus := systray.AddMenuItem("Status: idle", "Current sync status")
 	mStatus.Disable()
 	systray.AddSeparator()
@@ -58,9 +58,9 @@ func onTrayReady(app *App) {
 	mStop := systray.AddMenuItem("Stop sync", "Pause syncing")
 	mStop.Hide()
 	systray.AddSeparator()
-	mAutostart := systray.AddMenuItemCheckbox("Start at login", "Launch s2sync automatically when you log in", service.IsAutostartEnabled())
+	mAutostart := systray.AddMenuItemCheckbox("Start at login", "Launch S2 Sync automatically when you log in", service.IsAutostartEnabled())
 	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("Quit s2sync", "Exit")
+	mQuit := systray.AddMenuItem("Quit S2 Sync", "Exit")
 
 	// Keep tray label/visibility in sync with service events.
 	go func() {

@@ -26,7 +26,7 @@ func main() {
 	startTray()
 
 	err := wails.Run(&options.App{
-		Title:             "s2sync",
+		Title:             "S2 Sync",
 		Width:             520,
 		Height:            640,
 		MinWidth:          420,

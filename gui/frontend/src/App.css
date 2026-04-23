@@ -297,3 +297,71 @@
   margin: 14px 0 0;
   text-align: center;
 }
+
+.signin-steps {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+.signin-steps li {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--bg-muted);
+}
+.signin-steps li.current {
+  background: var(--primary);
+  color: #fff;
+}
+.signin-steps li.done {
+  background: var(--bg-muted);
+  color: var(--text-muted);
+}
+
+.scope-summary {
+  border: 1px solid var(--border);
+  background: var(--bg-muted);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+}
+.scope-summary-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  margin-bottom: 4px;
+}
+.scope-summary-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+}
+.scope-summary-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.link-btn {
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--primary);
+  padding: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+.link-btn:disabled {
+  color: var(--text-subtle);
+  cursor: default;
+  text-decoration: none;
+}

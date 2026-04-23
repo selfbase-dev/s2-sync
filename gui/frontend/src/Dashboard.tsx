@@ -48,7 +48,7 @@ export function Dashboard({
         <div className="brand">
           <div className="brand-mark">S2</div>
           <div>
-            <h1>s2sync</h1>
+            <h1>S2 Sync</h1>
             <div className="brand-sub">{endpoint}</div>
           </div>
         </div>
@@ -125,7 +125,7 @@ export function Dashboard({
                 checked={autostart}
                 onChange={(e) => onAutostartChange(e.target.checked)}
               />
-              <span>Start s2sync at login</span>
+              <span>Start S2 Sync at login</span>
             </label>
           </div>
         </div>
