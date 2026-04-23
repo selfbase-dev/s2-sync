@@ -4,6 +4,7 @@ import {
   PickFolder,
   SaveToken,
   StartSync,
+  ValidateToken,
 } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
 
@@ -35,7 +36,7 @@ export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }:
     setError("");
     setBusy(true);
     try {
-      await SaveToken(token);
+      await ValidateToken(token);
       setStep(2);
     } catch (e: any) {
       setError(String(e?.message ?? e));
@@ -44,12 +45,16 @@ export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }:
     }
   };
 
+  // Step 2 Connect: persist the token only now that the user has
+  // committed to a folder. Keeps keyring / HasToken() aligned with
+  // "onboarding complete" so closing mid-flow leaves no state behind.
   const connect = async () => {
     if (busy) return;
     setError("");
     setBusy(true);
     try {
       const folderPath = folder || defaultFolder;
+      await SaveToken(token);
       await EnsureFolder(folderPath);
       await StartSync(folderPath);
       onConnected(folderPath);

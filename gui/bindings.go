@@ -24,12 +24,12 @@ func (a *App) HasToken() bool {
 	return err == nil && t != ""
 }
 
-// SaveToken validates against /api/me and stores a token in the system
-// keyring. We deliberately don't surface the token's scope (base_path /
-// access_paths) to the UI: for delegated tokens the holder is not
-// supposed to know where their sandbox is mounted in the delegator's
-// tree, and /api/files already lists paths relative to base.
-func (a *App) SaveToken(token string) error {
+// ValidateToken checks format and calls /api/me without persisting.
+// Used by the onboarding Step 1 so that a validated-but-not-committed
+// token does not create persistent app state; only SaveToken commits
+// to the keyring once the user completes Step 2. Keeps the keyring
+// aligned with "onboarding complete" (which HasToken() reports on).
+func (a *App) ValidateToken(token string) error {
 	token = strings.TrimSpace(token)
 	if !strings.HasPrefix(token, "s2_") {
 		return fmt.Errorf("invalid token: must start with s2_")
@@ -38,7 +38,18 @@ func (a *App) SaveToken(token string) error {
 	if _, err := c.Me(); err != nil {
 		return fmt.Errorf("token validation failed: %w", err)
 	}
-	return auth.SetKeyring(token)
+	return nil
+}
+
+// SaveToken persists a token to the system keyring. Callers are
+// expected to have validated it via ValidateToken first; this method
+// still runs the same format + /api/me check defensively so older
+// paths (CLI login, future callers) stay safe.
+func (a *App) SaveToken(token string) error {
+	if err := a.ValidateToken(token); err != nil {
+		return err
+	}
+	return auth.SetKeyring(strings.TrimSpace(token))
 }
 
 // ClearToken stops any running sync and removes the stored token.
