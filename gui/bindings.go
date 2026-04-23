@@ -13,17 +13,8 @@ import (
 	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
 	"github.com/selfbase-dev/s2-sync/internal/service"
-	"github.com/selfbase-dev/s2-sync/internal/types"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
-
-// TokenScope is the scope summary returned by SaveToken so the UI can
-// show the user what the accepted token grants access to.
-type TokenScope struct {
-	BasePath    string             `json:"basePath"`
-	AccessPaths []types.AccessPath `json:"accessPaths"`
-	CanDelegate bool               `json:"canDelegate"`
-}
 
 // --- Auth ---
 
@@ -33,27 +24,21 @@ func (a *App) HasToken() bool {
 	return err == nil && t != ""
 }
 
-// SaveToken validates against /api/me, stores the token in the system
-// keyring, and returns the token's scope so the UI can confirm what the
-// user just connected to.
-func (a *App) SaveToken(token string) (*TokenScope, error) {
+// SaveToken validates against /api/me and stores a token in the system
+// keyring. We deliberately don't surface the token's scope (base_path /
+// access_paths) to the UI: for delegated tokens the holder is not
+// supposed to know where their sandbox is mounted in the delegator's
+// tree, and /api/files already lists paths relative to base.
+func (a *App) SaveToken(token string) error {
 	token = strings.TrimSpace(token)
 	if !strings.HasPrefix(token, "s2_") {
-		return nil, fmt.Errorf("invalid token: must start with s2_")
+		return fmt.Errorf("invalid token: must start with s2_")
 	}
 	c := client.New(a.endpoint, token)
-	me, err := c.Me()
-	if err != nil {
-		return nil, fmt.Errorf("token validation failed: %w", err)
+	if _, err := c.Me(); err != nil {
+		return fmt.Errorf("token validation failed: %w", err)
 	}
-	if err := auth.SetKeyring(token); err != nil {
-		return nil, err
-	}
-	return &TokenScope{
-		BasePath:    me.BasePath,
-		AccessPaths: me.AccessPaths,
-		CanDelegate: me.CanDelegate,
-	}, nil
+	return auth.SetKeyring(token)
 }
 
 // ClearToken stops any running sync and removes the stored token.

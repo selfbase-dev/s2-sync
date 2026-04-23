@@ -322,31 +322,6 @@
   color: var(--text-muted);
 }
 
-.scope-summary {
-  border: 1px solid var(--border);
-  background: var(--bg-muted);
-  border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 16px;
-}
-.scope-summary-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-subtle);
-  margin-bottom: 4px;
-}
-.scope-summary-body code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  color: var(--text);
-}
-.scope-summary-meta {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
 .link-btn {
   width: 100%;
   background: transparent;

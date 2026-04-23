@@ -6,7 +6,6 @@ import {
   StartSync,
 } from "../wailsjs/go/main/App";
 import { BrowserOpenURL } from "../wailsjs/runtime/runtime";
-import { main } from "../wailsjs/go/models";
 
 interface Props {
   endpoint: string;
@@ -18,7 +17,6 @@ interface Props {
 export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }: Props) {
   const [step, setStep] = useState<1 | 2>(1);
   const [token, setToken] = useState("");
-  const [scope, setScope] = useState<main.TokenScope | null>(null);
   const [folder, setFolder] = useState(initialFolder);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -37,8 +35,7 @@ export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }:
     setError("");
     setBusy(true);
     try {
-      const s = await SaveToken(token);
-      setScope(s);
+      await SaveToken(token);
       setStep(2);
     } catch (e: any) {
       setError(String(e?.message ?? e));
@@ -114,27 +111,7 @@ export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }:
           </>
         ) : (
           <>
-            <div className="scope-summary" role="status">
-              <div className="scope-summary-label">Connected</div>
-              <div className="scope-summary-body">
-                {scope?.basePath ? (
-                  <>
-                    <code>{scope.basePath}</code>
-                    {scope.accessPaths && scope.accessPaths.length > 0 && (
-                      <span className="scope-summary-meta">
-                        {" · "}
-                        {scope.accessPaths.length} path
-                        {scope.accessPaths.length === 1 ? "" : "s"}
-                      </span>
-                    )}
-                  </>
-                ) : (
-                  <span className="scope-summary-meta">Full account access</span>
-                )}
-              </div>
-            </div>
-
-            <p className="signin-help">Choose which local folder to sync.</p>
+            <p className="signin-help">Token validated. Choose which local folder to sync.</p>
 
             <div className="form-group">
               <label className="form-label">Folder</label>
@@ -168,7 +145,6 @@ export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }:
               className="btn link-btn"
               onClick={() => {
                 setStep(1);
-                setScope(null);
                 setError("");
               }}
               disabled={busy}
