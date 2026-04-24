@@ -204,7 +204,7 @@ func (e *testEnv) deleteRemote(relPath string) {
 // moveRemote moves a file on the remote server.
 func (e *testEnv) moveRemote(from, to string) {
 	e.t.Helper()
-	if err := e.client.Move(from, to, false); err != nil {
+	if _, err := e.client.Move(from, to); err != nil {
 		e.t.Fatalf("moveRemote(%s → %s): %v", from, to, err)
 	}
 }
@@ -229,19 +229,25 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 	state.ClearFiles()
 
 	exclude := LoadExclude(e.localDir)
-	localFiles, err := Walk(e.localDir, state.Files, exclude)
+	walkRes, err := Walk(e.localDir, state.Files, exclude)
 	if err != nil {
 		e.t.Fatalf("Walk: %v", err)
 	}
+	localFiles := walkRes.Files
+
+	caseInsensitive := IsCaseInsensitiveFS(e.localDir)
 
 	// ADR 0039/0040: atomic snapshot + cursor.
 	remoteFiles, snapshotCursor, err := FetchSnapshotAsRemoteFiles(e.client, "")
 	if err != nil {
 		e.t.Fatalf("Snapshot: %v", err)
 	}
+	remoteFiles, _ = NormalizeRemoteMap(remoteFiles, caseInsensitive)
 	PrefillArchiveForIdempotentApply(state, localFiles, remoteFiles)
 
 	plans := Compare(localFiles, remoteFiles, state.Files)
+	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
+	plans = NeutralizeLocalRemoteCaseCollisions(plans, caseInsensitive)
 	result, err := Execute(plans, e.localDir, "", e.client, state, false)
 	if err != nil {
 		e.t.Fatalf("Execute: %v", err)
@@ -259,10 +265,12 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	e.t.Helper()
 	exclude := LoadExclude(e.localDir)
-	localFiles, err := Walk(e.localDir, state.Files, exclude)
+	walkRes, err := Walk(e.localDir, state.Files, exclude)
 	if err != nil {
 		e.t.Fatalf("Walk: %v", err)
 	}
+	localFiles := walkRes.Files
+	caseInsensitive := IsCaseInsensitiveFS(e.localDir)
 
 	resp, err := e.client.PollChanges(state.Cursor)
 	if err == client.ErrCursorGone {
@@ -303,11 +311,16 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	if err != nil {
 		e.t.Fatalf("HandleIncrementalDirEvents: %v", err)
 	}
+	for i := range dirOutcome.SubtreeSnapshots {
+		filtered, _ := NormalizeRemoteMap(dirOutcome.SubtreeSnapshots[i].Remote, caseInsensitive)
+		dirOutcome.SubtreeSnapshots[i].Remote = filtered
+	}
 	if dirOutcome.LocalChanged || len(dirOutcome.SubtreeSnapshots) > 0 {
-		localFiles, err = Walk(e.localDir, state.Files, exclude)
+		walkRes, err = Walk(e.localDir, state.Files, exclude)
 		if err != nil {
 			e.t.Fatalf("Walk (post dir events): %v", err)
 		}
+		localFiles = walkRes.Files
 	}
 
 	subtreePlans := dirOutcome.SubtreeComparePlans(localFiles, state.Files)
@@ -317,6 +330,8 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 		subtreePlans,
 		dirOutcome.ArchiveWalkPlans,
 	)
+	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
+	plans = NeutralizeLocalRemoteCaseCollisions(plans, caseInsensitive)
 
 	result, err := Execute(plans, e.localDir, "", e.client, state, false)
 	if err != nil {
@@ -739,10 +754,11 @@ func TestS32_PullDuringLocalEdit(t *testing.T) {
 	}
 	defer state.Close()
 	exclude := LoadExclude(env.localDir)
-	localFiles, err := Walk(env.localDir, state.Files, exclude)
+	walkRes, err := Walk(env.localDir, state.Files, exclude)
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
+	localFiles := walkRes.Files
 
 	resp, err := env.client.PollChanges(state.Cursor)
 	if err != nil {
@@ -894,7 +910,7 @@ func TestScoped_S22_AncestorMoveBecomesDelete(t *testing.T) {
 
 	// Parent moves the outer directory → ancestor of nested token's scope
 	movedDir := outerDir + "-moved"
-	if err := pc.Move(outerDir+"/", movedDir+"/", false); err != nil {
+	if _, err := pc.Move(outerDir+"/", movedDir+"/"); err != nil {
 		t.Skipf("move not supported: %v", err)
 	}
 
@@ -914,4 +930,120 @@ func TestScoped_S22_AncestorMoveBecomesDelete(t *testing.T) {
 	if !foundScopeDelete {
 		t.Errorf("expected a transformed `delete /` entry after ancestor move; got %+v", resp.Changes)
 	}
+}
+
+// --- ADR 0053: case-sensitivity and Unicode normalization ---
+
+// On macOS the literal "à.txt" lands on disk as NFD ("a" + U+0300).
+// After sync, the server side must see the NFC form so Linux/Windows
+// clients treat it as the same file.
+func TestCase_NFDUploadedAsNFC(t *testing.T) {
+	env := newTestEnv(t)
+	// Raw NFD: "a" + U+0300 combining grave, then ".txt"
+	nfd := "à.txt"
+	nfc := "à.txt"
+	env.writeLocal(nfd, "bonjour")
+
+	result := env.sync()
+	if result.Pushed < 1 {
+		t.Errorf("pushed = %d, want >= 1", result.Pushed)
+	}
+	if !env.remoteExists(nfc) {
+		t.Errorf("remote should have NFC %q, got none", nfc)
+	}
+	if got := env.readRemote(nfc); got != "bonjour" {
+		t.Errorf("remote content = %q", got)
+	}
+}
+
+// Case-only rename (Mac: file.txt → File.txt) must propagate via the
+// server MOVE API as a single "move" changelog entry, not as
+// delete+put. The atomicity is visible via revision_id: after a MOVE
+// the destination's revision id matches the source's (history
+// preserved), whereas delete+put creates a fresh revision.
+func TestCase_CaseOnlyRename_UsesMOVE(t *testing.T) {
+	env := newTestEnv(t)
+	env.writeLocal("file.txt", "content")
+	env.sync()
+	origRev := env.remoteRevisionID("file.txt")
+	if origRev == "" {
+		t.Fatal("expected revision_id for file.txt after initial sync")
+	}
+
+	// Rename locally: Mac is case-insensitive but case-preserving,
+	// so this creates a distinct walk-level path with the same inode.
+	if err := os.Rename(
+		filepath.Join(env.localDir, "file.txt"),
+		filepath.Join(env.localDir, "File.txt"),
+	); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	result := env.sync()
+	if result.Moved != 1 {
+		t.Errorf("moved = %d, want 1 (case-only rename should use MOVE)", result.Moved)
+	}
+
+	// Server should now have File.txt with the SAME revision id —
+	// proving MOVE was used, not delete+put.
+	if !env.remoteExists("File.txt") {
+		t.Fatal("remote should have File.txt after rename")
+	}
+	newRev := env.remoteRevisionID("File.txt")
+	if newRev != origRev {
+		t.Errorf("revision_id changed: %s → %s (MOVE should preserve it)", origRev, newRev)
+	}
+	if env.remoteExists("file.txt") {
+		// On case-sensitive server, old path should be gone after MOVE.
+		t.Error("remote should no longer have old file.txt")
+	}
+}
+
+// Server has File.txt and file.txt both. On case-insensitive local FS,
+// only the canonical-sort-first (File.txt, because 'F' < 'f') is
+// pulled; the other is surfaced as a warning and not written. Sync
+// does not stop.
+func TestCase_RemoteCollision_Skipped(t *testing.T) {
+	if !IsCaseInsensitiveFS(os.TempDir()) {
+		t.Skip("local FS is case-sensitive; cannot verify skip behavior")
+	}
+	env := newTestEnv(t)
+	env.putRemote("File.txt", "upper")
+	env.putRemote("file.txt", "lower")
+
+	env.sync()
+
+	// Lex-first "File.txt" should be present locally
+	if got := env.readLocal("File.txt"); got != "upper" {
+		t.Errorf("local File.txt = %q, want 'upper'", got)
+	}
+	// "file.txt" should NOT have been pulled (would have overwritten
+	// the inode of File.txt on case-insensitive FS).
+	localPath := filepath.Join(env.localDir, "file.txt")
+	info, err := os.Stat(localPath)
+	if err == nil {
+		// Same inode is OK (they're the same file on case-insensitive FS)
+		// but content must still be File.txt's content.
+		if content, _ := os.ReadFile(localPath); string(content) != "upper" {
+			t.Errorf("lower-case variant content = %q, want 'upper' (same-inode ok)", string(content))
+		}
+		_ = info
+	}
+}
+
+// remoteRevisionID helper — looks up the current revision id of a
+// remote path via snapshot. Returns "" if not found.
+func (e *testEnv) remoteRevisionID(relPath string) string {
+	e.t.Helper()
+	resp, err := e.client.Snapshot("")
+	if err != nil {
+		e.t.Fatalf("Snapshot: %v", err)
+	}
+	full := strings.TrimSuffix(e.basePath, "/") + "/" + relPath
+	for _, it := range resp.Items {
+		if it.Path == full || it.Path == "/"+relPath {
+			return it.RevisionID
+		}
+	}
+	return ""
 }

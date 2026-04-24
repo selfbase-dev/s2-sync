@@ -38,6 +38,9 @@ const (
 	DeleteRemote
 	Conflict
 	PreserveLocalRename
+	Move             // push side: atomic server MOVE from From→Path (ADR 0053)
+	MoveApply        // pull side: server already moved, apply locally (os.Rename)
+	SkipCaseConflict // terminal: file skipped due to case/unicode collision (ADR 0053)
 )
 
 func (a SyncAction) String() string {
@@ -56,14 +59,22 @@ func (a SyncAction) String() string {
 		return "conflict"
 	case PreserveLocalRename:
 		return "preserve-local-rename"
+	case Move:
+		return "move"
+	case MoveApply:
+		return "move-apply"
+	case SkipCaseConflict:
+		return "skip-case-conflict"
 	default:
 		return "unknown"
 	}
 }
 
 // SyncPlan represents the classified action for a single file path.
+// For Action=Move, Path is the destination and From is the source.
 type SyncPlan struct {
 	Path       string
+	From       string
 	Action     SyncAction
 	RevisionID string
 	Hash       string

@@ -99,6 +99,13 @@ func CompareIncremental(
 	}
 
 	remoteChanged := make(map[string]types.ChangeEntry)
+	// fileMoves holds intact move events so the pull side can apply
+	// them as a single os.Rename instead of decomposed delete+put.
+	// Decomposing is unsafe on case-insensitive filesystems: a
+	// case-only rename's source and destination share an inode, so
+	// applying delete after pull removes the just-written file
+	// (ADR 0053).
+	var fileMoves []types.ChangeEntry
 	for _, ch := range remoteChanges {
 		// Callers are expected to pre-split dir events out and route
 		// them through HandleIncrementalDirEvents (ADR 0040 hybrid
@@ -121,16 +128,10 @@ func CompareIncremental(
 				}
 			}
 		case "move":
-			// move = delete at path_before + put at path_after
-			if ch.PathBefore != "" {
-				if k, ok := safeKey(ch.PathBefore); ok {
-					remoteChanged[k] = types.ChangeEntry{Action: "delete", PathBefore: ch.PathBefore}
-				}
-			}
-			if ch.PathAfter != "" {
-				if k, ok := safeKey(ch.PathAfter); ok {
-					remoteChanged[k] = ch
-				}
+			// Preserve the move as a single event. Emitted below as
+			// a MoveApply plan (or Conflict if local drifted).
+			if ch.PathBefore != "" && ch.PathAfter != "" {
+				fileMoves = append(fileMoves, ch)
 			}
 		}
 	}
@@ -217,6 +218,43 @@ func CompareIncremental(
 				Hash:       rch.Hash,
 			})
 		}
+	}
+
+	// Emit file moves as MoveApply (safe for case-only renames on
+	// case-insensitive FS) or Conflict if local drifted after the
+	// server-side move was initiated.
+	for _, ch := range fileMoves {
+		before, ok := safeKey(ch.PathBefore)
+		if !ok {
+			continue
+		}
+		after, ok := safeKey(ch.PathAfter)
+		if !ok {
+			continue
+		}
+		l, hasLocal := local[before]
+		a, hasArchive := archive[before]
+		localDrifted := hasLocal && hasArchive && l.Hash != a.LocalHash
+		if localDrifted {
+			// Local edited the source after its last sync — emit
+			// Conflict on the destination so the executor downloads
+			// the server's new version without destroying the local
+			// edit.
+			plans = append(plans, types.SyncPlan{
+				Path:       after,
+				Action:     types.Conflict,
+				RevisionID: ch.RevisionID,
+				Hash:       ch.Hash,
+			})
+			continue
+		}
+		plans = append(plans, types.SyncPlan{
+			Path:       after,
+			From:       before,
+			Action:     types.MoveApply,
+			RevisionID: ch.RevisionID,
+			Hash:       ch.Hash,
+		})
 	}
 
 	sortPlansByPath(plans)

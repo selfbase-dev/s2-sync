@@ -736,13 +736,20 @@ func TestMove_Success(t *testing.T) {
 			if body["destination"] != "new/path.txt" {
 				t.Errorf("destination = %v", body["destination"])
 			}
-			jsonResponse(w, 200, map[string]any{"id": "n1"})
+			jsonResponse(w, 200, map[string]any{"id": "n1", "seq": int64(42), "content_version": int64(3)})
 		},
 	})
 
 	c := New(srv.URL, "s2_test")
-	if err := c.Move("old/path.txt", "new/path.txt", false); err != nil {
+	result, err := c.Move("old/path.txt", "new/path.txt")
+	if err != nil {
 		t.Fatalf("Move() error: %v", err)
+	}
+	if result == nil || result.ID != "n1" || result.ContentVersion != 3 {
+		t.Errorf("unexpected result: %+v", result)
+	}
+	if result.Seq == nil || *result.Seq != 42 {
+		t.Errorf("seq = %v, want 42", result.Seq)
 	}
 }
 

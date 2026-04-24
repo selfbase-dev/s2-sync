@@ -43,6 +43,12 @@ type State struct {
 	// Cursor is the remote change-log position.
 	Cursor string
 
+	// ReportedCollisions is the set of FoldKeys for collisions that were
+	// already warned about in a previous sync. Compared against the
+	// current sync's collisions to suppress repeated warnings (ADR 0053
+	// key concept 5: deterministic + debounced logging). Sorted, unique.
+	ReportedCollisions []string
+
 	pushedSeqs map[int64]struct{}
 
 	identity Identity
@@ -138,13 +144,14 @@ func openAndLoad(syncRoot string, identity Identity) (*State, error) {
 	}
 
 	state := &State{
-		Files:      snap.Files,
-		Cursor:     snap.Cursor,
-		pushedSeqs: make(map[int64]struct{}, len(snap.PushedSeqs)),
-		identity:   Identity{Endpoint: snap.Endpoint, UserID: snap.UserID, BasePath: snap.BasePath},
-		dirty:      make(map[string]struct{}),
-		db:         db,
-		root:       syncRoot,
+		Files:              snap.Files,
+		Cursor:             snap.Cursor,
+		ReportedCollisions: parseCollisionKeys(snap.CollisionKeys),
+		pushedSeqs:         make(map[int64]struct{}, len(snap.PushedSeqs)),
+		identity:           Identity{Endpoint: snap.Endpoint, UserID: snap.UserID, BasePath: snap.BasePath},
+		dirty:              make(map[string]struct{}),
+		db:                 db,
+		root:               syncRoot,
 	}
 	for _, seq := range snap.PushedSeqs {
 		state.pushedSeqs[seq] = struct{}{}
@@ -240,11 +247,12 @@ func (s *State) Save() error {
 	}
 
 	p := flushParams{
-		Cursor:   s.Cursor,
-		Endpoint: s.identity.Endpoint,
-		UserID:   s.identity.UserID,
-		BasePath: s.identity.BasePath,
-		ClearAll: s.clearAll,
+		Cursor:        s.Cursor,
+		Endpoint:      s.identity.Endpoint,
+		UserID:        s.identity.UserID,
+		BasePath:      s.identity.BasePath,
+		CollisionKeys: encodeCollisionKeys(s.ReportedCollisions),
+		ClearAll:      s.clearAll,
 	}
 
 	if len(s.dirty) > 0 {
@@ -321,6 +329,21 @@ func (s *State) ClearFiles() {
 	s.Files = make(map[string]types.FileState)
 	s.dirty = make(map[string]struct{})
 	s.clearAll = true
+}
+
+// SetReportedCollisions replaces the debounce set with keys, deduped
+// and sorted. Returns the newly-appeared and newly-resolved keys
+// relative to the previous value, so the caller can log only the diff
+// (ADR 0053: warning is debounced; same collision does not re-log).
+// Save writes state_meta unconditionally, so no dirty flag needed.
+func (s *State) SetReportedCollisions(keys []string) (added, resolved []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sorted := uniqSorted(keys)
+	prev := s.ReportedCollisions
+	added, resolved = diffSortedStrings(prev, sorted)
+	s.ReportedCollisions = sorted
+	return added, resolved
 }
 
 // AddPushedSeq records a seq for self-change filtering.

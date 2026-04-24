@@ -15,6 +15,8 @@ type ExecuteResult struct {
 	Pushed    int
 	Pulled    int
 	Deleted   int
+	Moved     int
+	Skipped   int
 	Conflicts int
 	Errors    []error
 }
@@ -145,6 +147,82 @@ func execute(
 				continue
 			}
 			result.Conflicts++
+
+		case types.Move:
+			// Case-only rename detected by MergeCaseOnlyRenames.
+			// plan.From = archive/remote source, plan.Path = destination.
+			// Atomic server MOVE preserves revision history (ADR 0053).
+			if dryRun {
+				fmt.Printf("[dry-run] move: %s → %s\n", plan.From, plan.Path)
+				result.Moved++
+				continue
+			}
+			srcKey := path.Join(remotePrefix, plan.From)
+			moveResult, err := c.Move(srcKey, remoteKey)
+			if err != nil {
+				if errors.Is(err, client.ErrMoveConflict) {
+					// ADR 0053: destination exists → treat as SkipCaseConflict,
+					// not delete+push fallback. Leave archive pointing at From
+					// so we keep tracking the source; the user must resolve.
+					result.Skipped++
+					fmt.Printf("skip (case conflict): %s → %s (destination exists on server)\n", plan.From, plan.Path)
+					continue
+				}
+				result.Errors = append(result.Errors, fmt.Errorf("move %s → %s: %w", plan.From, plan.Path, err))
+				continue
+			}
+			if moveResult != nil && moveResult.Seq != nil {
+				state.AddPushedSeq(*moveResult.Seq)
+			}
+			state.MoveFile(plan.From, plan.Path)
+			if newRow, ok := state.Files[plan.Path]; ok {
+				if moveResult != nil {
+					newRow.ContentVersion = moveResult.ContentVersion
+					state.RecordFile(plan.Path, newRow.LocalHash, moveResult.ContentVersion, newRow.RevisionID)
+				}
+			}
+			result.Moved++
+			fmt.Printf("moved: %s → %s\n", plan.From, plan.Path)
+
+		case types.MoveApply:
+			// Pull side of a case-only rename / file move (ADR 0053).
+			// Server already moved; we apply os.Rename locally to
+			// preserve the inode — critical for case-only renames on
+			// case-insensitive FS (Mac/Win) where delete+download of
+			// the same inode would race and corrupt the file.
+			if dryRun {
+				fmt.Printf("[dry-run] move-apply: %s → %s\n", plan.From, plan.Path)
+				result.Moved++
+				continue
+			}
+			oldLocal, err := safeJoin(localRoot, plan.From)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("move-apply src %s: %w", plan.From, err))
+				continue
+			}
+			if err := os.MkdirAll(path.Dir(localPath), 0755); err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("move-apply mkdir %s: %w", plan.Path, err))
+				continue
+			}
+			if err := os.Rename(oldLocal, localPath); err != nil && !os.IsNotExist(err) {
+				result.Errors = append(result.Errors, fmt.Errorf("move-apply rename %s → %s: %w", plan.From, plan.Path, err))
+				continue
+			}
+			state.MoveFile(plan.From, plan.Path)
+			result.Moved++
+			fmt.Printf("move-apply: %s → %s\n", plan.From, plan.Path)
+
+		case types.SkipCaseConflict:
+			// ADR 0053: terminal state — do not touch local or remote.
+			// Leave archive alone so the collision is re-detected next
+			// sync (warning debounce in state prevents log spam).
+			if dryRun {
+				fmt.Printf("[dry-run] skip (case conflict): %s\n", plan.Path)
+				result.Skipped++
+				continue
+			}
+			result.Skipped++
+			fmt.Printf("skip (case conflict): %s\n", plan.Path)
 		}
 	}
 

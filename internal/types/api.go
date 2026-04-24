@@ -77,6 +77,15 @@ type DeleteResult struct {
 	Seq *int64 `json:"seq"`
 }
 
+// MoveResult from POST /api/file-moves/{path}. Carries the changelog
+// seq (so the client can self-change-filter) and the node's
+// content_version (for archive updates after a case-only rename).
+type MoveResult struct {
+	ID             string `json:"id"`
+	Seq            *int64 `json:"seq"`
+	ContentVersion int64  `json:"content_version"`
+}
+
 // ChangeEntry from GET /api/changes.
 type ChangeEntry struct {
 	Seq            int64  `json:"seq"`
