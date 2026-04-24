@@ -33,22 +33,29 @@ func (o SyncOptions) errorf(format string, a ...any) {
 func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *State, opts SyncOptions) error {
 	state.ClearFiles()
 
+	caseInsensitive := IsCaseInsensitiveFS(localDir)
+
 	exclude := LoadExclude(localDir)
-	localFiles, err := Walk(localDir, state.Files, exclude)
+	walkResult, err := Walk(localDir, state.Files, exclude)
 	if err != nil {
 		return fmt.Errorf("local scan failed: %w", err)
 	}
+	localFiles := walkResult.Files
 
 	remoteFiles, snapshotCursor, err := Bootstrap(c)
 	if err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
+	remoteFiles, remoteCollisions := NormalizeRemoteMap(remoteFiles, caseInsensitive)
+	reportCollisions(collectCollisions(walkResult.Collisions, remoteCollisions), state, opts)
 
 	prefilled := PrefillArchiveForIdempotentApply(state, localFiles, remoteFiles)
 	opts.printf("Local: %d files, Remote: %d files (%d already in sync)\n",
 		len(localFiles), len(remoteFiles), prefilled)
 
 	plans := Compare(localFiles, remoteFiles, state.Files)
+	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
+	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
 
 	result, err := executePlans(plans, localDir, remotePrefix, c, state, opts)
 	if err != nil {
@@ -71,11 +78,15 @@ func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *Stat
 // RunIncrementalSync orchestrates an incremental sync from the current
 // cursor. Falls back to RunInitialSync on cursor expiry.
 func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *State, opts SyncOptions) error {
+	caseInsensitive := IsCaseInsensitiveFS(localDir)
+
 	exclude := LoadExclude(localDir)
-	localFiles, err := Walk(localDir, state.Files, exclude)
+	walkResult, err := Walk(localDir, state.Files, exclude)
 	if err != nil {
 		return fmt.Errorf("local scan failed: %w", err)
 	}
+	localFiles := walkResult.Files
+	var allRemoteCollisions []CollisionGroup
 
 	resp, err := c.PollChanges(state.Cursor)
 	if err == client.ErrCursorGone {
@@ -108,16 +119,25 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 	if err != nil {
 		return fmt.Errorf("dir event handling: %w", err)
 	}
+	for i := range dirOutcome.SubtreeSnapshots {
+		filtered, coll := NormalizeRemoteMap(dirOutcome.SubtreeSnapshots[i].Remote, caseInsensitive)
+		dirOutcome.SubtreeSnapshots[i].Remote = filtered
+		allRemoteCollisions = append(allRemoteCollisions, coll...)
+	}
 	if dirOutcome.LocalChanged || len(dirOutcome.SubtreeSnapshots) > 0 {
-		localFiles, err = Walk(localDir, state.Files, exclude)
+		walkResult, err = Walk(localDir, state.Files, exclude)
 		if err != nil {
 			return fmt.Errorf("local re-scan failed: %w", err)
 		}
+		localFiles = walkResult.Files
 	}
+	reportCollisions(collectCollisions(walkResult.Collisions, allRemoteCollisions), state, opts)
 
 	subtreePlans := dirOutcome.SubtreeComparePlans(localFiles, state.Files)
 	fileLevelPlans := CompareIncremental(localFiles, state.Files, fileChanges)
 	plans := MergePlansByPath(fileLevelPlans, subtreePlans, dirOutcome.ArchiveWalkPlans)
+	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
+	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
 
 	hasLocalChanges := HasLocalChanges(localFiles, state.Files)
 
@@ -149,6 +169,42 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 		}
 	}
 	return nil
+}
+
+// collectCollisions gathers local + remote collision groups into a
+// unified set keyed by FoldKey for debounced warning reporting.
+func collectCollisions(groups ...[]CollisionGroup) []CollisionGroup {
+	var all []CollisionGroup
+	for _, g := range groups {
+		for _, c := range g {
+			if len(c.Paths) > 1 {
+				all = append(all, c)
+			}
+		}
+	}
+	return all
+}
+
+// reportCollisions applies debounce: only logs groups whose FoldKey was
+// not in state.ReportedCollisions, and logs "resolved: X" for keys that
+// dropped out since the last sync (deterministic tie-break: warnings
+// happen on state transitions only).
+func reportCollisions(groups []CollisionGroup, state *State, opts SyncOptions) {
+	keys := make([]string, 0, len(groups))
+	byKey := make(map[string]CollisionGroup, len(groups))
+	for _, g := range groups {
+		keys = append(keys, g.Key)
+		byKey[g.Key] = g
+	}
+	added, resolved := state.SetReportedCollisions(keys)
+	for _, k := range added {
+		g := byKey[k]
+		opts.errorf("warning: case/unicode collision for %q: %v (syncing %q only)\n",
+			g.Key, g.Paths, g.Paths[0])
+	}
+	for _, k := range resolved {
+		opts.printf("resolved: case/unicode collision for %q\n", k)
+	}
 }
 
 // executePlans runs the max-delete safety check, prints plan summary,

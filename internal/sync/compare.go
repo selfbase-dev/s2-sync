@@ -3,7 +3,6 @@ package sync
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
@@ -77,20 +76,14 @@ func CompareIncremental(
 		archive = make(map[string]types.FileState)
 	}
 
-	// Build set of remotely changed paths and their actions.
-	// Skip directory events (mkdir) — we only sync files; directories are
-	// created implicitly when pulling files into them.
-	// normPath strips the leading "/" that the server's absolutePathToClient adds
-	// so change paths match the slash-free keys used by Walk and ListAllRecursive.
-	normPath := func(p string) string { return strings.TrimPrefix(p, "/") }
-
-	// safeKey is normPath + defence-in-depth traversal filter. Unsafe
-	// paths (traversal, null bytes, empty) are dropped with a warning —
-	// the executor would refuse them via safeJoin anyway, and filtering
-	// here keeps a single bad change entry from derailing the whole
-	// sync batch.
+	// safeKey strips the leading "/" the server adds via
+	// absolutePathToClient, canonicalizes to NFC + forward slashes so
+	// keys match walk/archive output, and filters unsafe paths
+	// (traversal, null bytes, empty) that the executor would refuse
+	// via safeJoin anyway. Dropping them here keeps one bad entry
+	// from derailing the whole sync batch.
 	safeKey := func(p string) (string, bool) {
-		k := normPath(p)
+		k := NormalizePath(p)
 		if !isSafeRelativePath(k) {
 			fmt.Printf("warning: skipping unsafe remote path: %s\n", p)
 			return "", false
@@ -99,11 +92,18 @@ func CompareIncremental(
 	}
 
 	remoteChanged := make(map[string]types.ChangeEntry)
+	// fileMoves holds intact move events so the pull side can apply
+	// them as a single os.Rename instead of decomposed delete+put.
+	// Decomposing is unsafe on case-insensitive filesystems: a
+	// case-only rename's source and destination share an inode, so
+	// applying delete after pull removes the just-written file.
+	var fileMoves []types.ChangeEntry
+	moveSources := make(map[string]struct{})
 	for _, ch := range remoteChanges {
 		// Callers are expected to pre-split dir events out and route
-		// them through HandleIncrementalDirEvents (ADR 0040 hybrid
-		// strategy). Any is_dir entry that slips through here is
-		// dropped so CompareIncremental stays file-level.
+		// them through HandleIncrementalDirEvents. Any is_dir entry
+		// that slips through here is dropped so CompareIncremental
+		// stays file-level.
 		if ch.IsDir {
 			continue
 		}
@@ -121,16 +121,15 @@ func CompareIncremental(
 				}
 			}
 		case "move":
-			// move = delete at path_before + put at path_after
-			if ch.PathBefore != "" {
-				if k, ok := safeKey(ch.PathBefore); ok {
-					remoteChanged[k] = types.ChangeEntry{Action: "delete", PathBefore: ch.PathBefore}
-				}
+			if ch.PathBefore == "" || ch.PathAfter == "" {
+				continue
 			}
-			if ch.PathAfter != "" {
-				if k, ok := safeKey(ch.PathAfter); ok {
-					remoteChanged[k] = ch
-				}
+			fileMoves = append(fileMoves, ch)
+			// Mark source so the classify loop doesn't emit a
+			// redundant DeleteRemote(source) for the "local deleted"
+			// case — the move handler owns that path.
+			if k, ok := safeKey(ch.PathBefore); ok {
+				moveSources[k] = struct{}{}
 			}
 		}
 	}
@@ -159,6 +158,13 @@ func CompareIncremental(
 	var plans []types.SyncPlan
 
 	for path := range paths {
+		// Move sources are handled exclusively by the fileMoves loop
+		// below so we don't emit DeleteRemote for a path the server
+		// moved (which would 404 or, worse, delete the new path on a
+		// case-insensitive server).
+		if _, isMoveSrc := moveSources[path]; isMoveSrc {
+			continue
+		}
 		l, hasLocal := local[path]
 		a, hasArchive := archive[path]
 		rch, hasRemoteChange := remoteChanged[path]
@@ -216,6 +222,65 @@ func CompareIncremental(
 				RevisionID: rch.RevisionID,
 				Hash:       rch.Hash,
 			})
+		}
+	}
+
+	// Emit file moves as MoveApply (safe for case-only renames on
+	// case-insensitive FS where delete+download would race on the
+	// same inode). Falls back to Pull when the local source is
+	// absent or drifted — os.Rename would be meaningless then, and
+	// we need the server's current content at the destination.
+	for _, ch := range fileMoves {
+		before, ok := safeKey(ch.PathBefore)
+		if !ok {
+			continue
+		}
+		after, ok := safeKey(ch.PathAfter)
+		if !ok {
+			continue
+		}
+		l, hasLocal := local[before]
+		a, hasArchive := archive[before]
+		sourceInSync := hasLocal && hasArchive && l.Hash == a.LocalHash
+
+		switch {
+		case sourceInSync:
+			// Happy path: rename the local file, carry archive
+			// metadata to the new path.
+			plans = append(plans, types.SyncPlan{
+				Path:       after,
+				From:       before,
+				Action:     types.MoveApply,
+				RevisionID: ch.RevisionID,
+				Hash:       ch.Hash,
+			})
+		case hasLocal && hasArchive && l.Hash != a.LocalHash:
+			// Local edited the source after its last sync — local
+			// wins at the old path, server's new content lands at
+			// the new path as a conflict.
+			plans = append(plans, types.SyncPlan{
+				Path:       after,
+				Action:     types.Conflict,
+				RevisionID: ch.RevisionID,
+				Hash:       ch.Hash,
+			})
+		default:
+			// No local source (either never had it, or user deleted
+			// it). Pull the destination fresh; the archive entry at
+			// the old path, if any, is cleaned by a synthetic
+			// DeleteLocal so subsequent syncs don't resurrect it.
+			plans = append(plans, types.SyncPlan{
+				Path:       after,
+				Action:     types.Pull,
+				RevisionID: ch.RevisionID,
+				Hash:       ch.Hash,
+			})
+			if hasArchive {
+				plans = append(plans, types.SyncPlan{
+					Path:   before,
+					Action: types.DeleteLocal,
+				})
+			}
 		}
 	}
 

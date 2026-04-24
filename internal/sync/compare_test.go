@@ -219,13 +219,15 @@ func TestCompareIncremental(t *testing.T) {
 			want:    map[string]types.SyncAction{"a.txt": types.Conflict},
 		},
 		{
-			name:    "remote move → delete at old + put at new",
+			// file moves are preserved as a single MoveApply
+			// plan (executed via os.Rename). Decomposing to delete+put
+			// would corrupt case-only renames on case-insensitive FS.
+			name:    "remote move → move-apply at new (preserves inode)",
 			local:   map[string]types.LocalFile{"old.txt": {Hash: "h1"}},
 			archive: map[string]types.FileState{"old.txt": {LocalHash: "h1"}},
 			changes: []types.ChangeEntry{{Action: "move", PathBefore: "old.txt", PathAfter: "new.txt"}},
 			want: map[string]types.SyncAction{
-				"old.txt": types.DeleteLocal,
-				"new.txt": types.Pull,
+				"new.txt": types.MoveApply,
 			},
 		},
 		{
@@ -280,8 +282,7 @@ func TestCompareIncremental(t *testing.T) {
 			archive: map[string]types.FileState{"old.txt": {LocalHash: "h1"}},
 			changes: []types.ChangeEntry{{Action: "move", PathBefore: "/old.txt", PathAfter: "/new.txt"}},
 			want: map[string]types.SyncAction{
-				"old.txt": types.DeleteLocal,
-				"new.txt": types.Pull,
+				"new.txt": types.MoveApply,
 			},
 		},
 	}

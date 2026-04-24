@@ -251,38 +251,55 @@ func (c *Client) Delete(path string) (*types.DeleteResult, error) {
 	return result, nil
 }
 
-// Move moves or renames a file/directory.
-func (c *Client) Move(srcPath, dstPath string, overwrite bool) error {
+// ErrMoveConflict is returned when POST /api/file-moves returns 409
+// (destination already exists or cycle detected). Callers should treat
+// this as SkipCaseConflict per the collision policy — do NOT fall back to
+// delete+push, which is not atomic and can lose data.
+var ErrMoveConflict = fmt.Errorf("move conflict: destination exists or cycle")
+
+// Move moves or renames a file/directory via POST /api/file-moves/{src}.
+// On 409 the returned error wraps ErrMoveConflict so callers can detect
+// the collision case without string-matching.
+//
+// The second return (*types.MoveResult) is populated on 200 with the
+// new node's changelog seq and content_version — needed by the sync
+// executor to self-filter the emitted change event and to update the
+// archive row in place.
+func (c *Client) Move(srcPath, dstPath string) (*types.MoveResult, error) {
 	payload := struct {
 		Destination string `json:"destination"`
-		Overwrite   bool   `json:"overwrite,omitempty"`
-	}{
-		Destination: dstPath,
-		Overwrite:   overwrite,
-	}
+	}{Destination: dstPath}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(c.reqContext(), "POST", c.endpoint+"/api/file-moves/"+srcPath, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c.setAuth(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("move failed: %w", err)
+		return nil, fmt.Errorf("move failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		return nil, fmt.Errorf("%w: src=%q dst=%q", ErrMoveConflict, srcPath, dstPath)
+	}
 	if err := checkStatus(resp); err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("move failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
+		return nil, fmt.Errorf("move failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
-	return nil
+
+	var result types.MoveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode move response: %w", err)
+	}
+	return &result, nil
 }

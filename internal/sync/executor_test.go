@@ -249,6 +249,166 @@ func TestExecute_DeleteRemote(t *testing.T) {
 	}
 }
 
+func TestExecute_Move_Success(t *testing.T) {
+	var gotSrc, gotDest string
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/api/file-moves/prefix/file.txt" {
+			gotSrc = r.URL.Path
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			gotDest, _ = body["destination"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{
+				"id":              "n1",
+				"seq":             int64(77),
+				"content_version": int64(5),
+			})
+		}
+	})
+
+	localDir := t.TempDir()
+	state := testStateFromArchive(map[string]types.FileState{
+		"file.txt": {LocalHash: "h1", ContentVersion: 4, RevisionID: "r1"},
+	})
+	plans := []types.SyncPlan{{
+		Path:   "File.txt",
+		From:   "file.txt",
+		Action: types.Move,
+		Hash:   "h1",
+	}}
+
+	result, _ := Execute(plans, localDir, "prefix/", c, state, false)
+	if result.Moved != 1 {
+		t.Errorf("moved = %d, want 1", result.Moved)
+	}
+	if gotSrc != "/api/file-moves/prefix/file.txt" {
+		t.Errorf("src path = %q, want /api/file-moves/prefix/file.txt", gotSrc)
+	}
+	if gotDest != "prefix/File.txt" {
+		t.Errorf("dest = %q, want prefix/File.txt", gotDest)
+	}
+	if _, ok := state.Files["file.txt"]; ok {
+		t.Error("archive should no longer have old path file.txt")
+	}
+	newRow, ok := state.Files["File.txt"]
+	if !ok {
+		t.Fatalf("archive should have new path File.txt, got: %+v", state.Files)
+	}
+	if newRow.ContentVersion != 5 {
+		t.Errorf("content_version = %d, want 5", newRow.ContentVersion)
+	}
+	if !state.IsPushedSeq(77) {
+		t.Error("seq 77 should be in pushed_seqs")
+	}
+}
+
+func TestExecute_Move_409_FallsBackToSkip(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]any{"error": "destination exists"})
+		}
+	})
+
+	localDir := t.TempDir()
+	state := testStateFromArchive(map[string]types.FileState{
+		"file.txt": {LocalHash: "h1"},
+	})
+	plans := []types.SyncPlan{{
+		Path:   "File.txt",
+		From:   "file.txt",
+		Action: types.Move,
+		Hash:   "h1",
+	}}
+
+	result, _ := Execute(plans, localDir, "", c, state, false)
+	if result.Moved != 0 {
+		t.Errorf("moved = %d, want 0 on 409", result.Moved)
+	}
+	if result.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1 on 409", result.Skipped)
+	}
+	// Archive MUST retain original — no delete+push fallback
+	if _, ok := state.Files["file.txt"]; !ok {
+		t.Error("archive should keep original file.txt after 409 (no destructive fallback)")
+	}
+}
+
+func TestExecute_MoveApply_PreservesInode(t *testing.T) {
+	// pull-side file move must apply os.Rename, not
+	// decompose into delete+download — essential for case-only
+	// renames on case-insensitive FS.
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("MoveApply must not hit the network, got %s %s", r.Method, r.URL.Path)
+	})
+
+	localDir := t.TempDir()
+	oldPath := filepath.Join(localDir, "old.txt")
+	if err := os.WriteFile(oldPath, []byte("content"), 0644); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	infoBefore, err := os.Stat(oldPath)
+	if err != nil {
+		t.Fatalf("stat old: %v", err)
+	}
+
+	state := testStateFromArchive(map[string]types.FileState{
+		"old.txt": {LocalHash: "h", ContentVersion: 1, RevisionID: "r"},
+	})
+	plans := []types.SyncPlan{{
+		Path:   "new.txt",
+		From:   "old.txt",
+		Action: types.MoveApply,
+	}}
+
+	result, _ := Execute(plans, localDir, "", c, state, false)
+	if result.Moved != 1 {
+		t.Errorf("moved = %d, want 1", result.Moved)
+	}
+	// New path exists, old does not
+	if _, err := os.Stat(filepath.Join(localDir, "old.txt")); !os.IsNotExist(err) {
+		t.Errorf("old.txt should be gone after move-apply, got: %v", err)
+	}
+	infoAfter, err := os.Stat(filepath.Join(localDir, "new.txt"))
+	if err != nil {
+		t.Fatalf("new.txt should exist: %v", err)
+	}
+	// Same inode — this is the critical property for case-only renames
+	if !os.SameFile(infoBefore, infoAfter) {
+		t.Error("os.Rename must preserve inode (expected SameFile)")
+	}
+	// Archive updated
+	if _, ok := state.Files["old.txt"]; ok {
+		t.Error("archive should drop old.txt")
+	}
+	if _, ok := state.Files["new.txt"]; !ok {
+		t.Error("archive should add new.txt")
+	}
+}
+
+func TestExecute_SkipCaseConflict_NoOp(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no HTTP call expected for SkipCaseConflict, got %s %s", r.Method, r.URL.Path)
+	})
+
+	localDir := t.TempDir()
+	state := testStateFromArchive(map[string]types.FileState{
+		"file.txt": {LocalHash: "h1"},
+	})
+	plans := []types.SyncPlan{{Path: "File.txt", Action: types.SkipCaseConflict}}
+
+	result, _ := Execute(plans, localDir, "", c, state, false)
+	if result.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1", result.Skipped)
+	}
+	// Archive unchanged — terminal state
+	if _, ok := state.Files["file.txt"]; !ok {
+		t.Error("archive should be untouched by SkipCaseConflict")
+	}
+}
+
 func TestExecute_Conflict_IdenticalContent(t *testing.T) {
 	content := "same content"
 	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
