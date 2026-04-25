@@ -79,3 +79,7 @@ git push origin vX.Y.Z
 ```
 
 GitHub Actions runs GoReleaser + a Wails build matrix on tag push and publishes all CLI and GUI artifacts (with aggregated `checksums.txt`) to GitHub Releases.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
