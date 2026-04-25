@@ -1,39 +1,74 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { OpenFolder } from "../wailsjs/go/main/App";
-import { Event, StateInfo, STATUS_LABEL, Status } from "./types";
+import {
+  EVENT_GROUPS,
+  EventGroup,
+  LogLevel,
+  LogRecord,
+  STATUS_LABEL,
+  StateInfo,
+  Status,
+  eventGroup,
+} from "./types";
 
 interface Props {
   endpoint: string;
   folder: string;
   state: StateInfo;
-  logs: Event[];
+  logs: LogRecord[];
+  logFile: string;
   autostart: boolean;
   onStart: () => void;
   onStop: () => void;
   onPickFolder: () => void;
   onAutostartChange: (next: boolean) => void;
   onDisconnect: () => void;
+  onClearLogs: () => void;
+  onOpenLogFile: () => void;
 }
+
+const LEVEL_ORDER: Record<LogLevel, number> = {
+  DEBUG: 0,
+  INFO: 1,
+  WARN: 2,
+  ERROR: 3,
+};
 
 export function Dashboard({
   endpoint,
   folder,
   state,
   logs,
+  logFile,
   autostart,
   onStart,
   onStop,
   onPickFolder,
   onAutostartChange,
   onDisconnect,
+  onClearLogs,
+  onOpenLogFile,
 }: Props) {
-  const activityRef = useRef<HTMLDivElement>(null);
+  const logsRef = useRef<HTMLDivElement>(null);
+  const [paused, setPaused] = useState(false);
+  const [minLevel, setMinLevel] = useState<LogLevel>("INFO");
+  const [activeGroups, setActiveGroups] = useState<Set<EventGroup | "other">>(
+    new Set([...EVENT_GROUPS, "other"]),
+  );
+
+  const filtered = useMemo(() => {
+    const minRank = LEVEL_ORDER[minLevel];
+    return logs.filter((r) => {
+      if (LEVEL_ORDER[r.level] < minRank) return false;
+      const g = eventGroup(r.event);
+      return activeGroups.has(g);
+    });
+  }, [logs, minLevel, activeGroups]);
 
   useEffect(() => {
-    if (activityRef.current) {
-      activityRef.current.scrollTop = activityRef.current.scrollHeight;
-    }
-  }, [logs]);
+    if (paused || !logsRef.current) return;
+    logsRef.current.scrollTop = logsRef.current.scrollHeight;
+  }, [filtered, paused]);
 
   const status: Status = state.status;
   const running = status === "running";
@@ -41,6 +76,13 @@ export function Dashboard({
   const lastSync = state.lastSync
     ? new Date(state.lastSync).toLocaleTimeString()
     : null;
+
+  const toggleGroup = (g: EventGroup | "other") => {
+    const next = new Set(activeGroups);
+    if (next.has(g)) next.delete(g);
+    else next.add(g);
+    setActiveGroups(next);
+  };
 
   return (
     <div className="app">
@@ -127,24 +169,89 @@ export function Dashboard({
         </div>
 
         <div className="card">
-          <div className="card-header">Activity</div>
+          <div className="card-header">
+            <span>Logs</span>
+            <div className="logs-actions">
+              <select
+                className="logs-level"
+                value={minLevel}
+                onChange={(e) => setMinLevel(e.target.value as LogLevel)}
+                title="Minimum level"
+              >
+                <option value="DEBUG">debug+</option>
+                <option value="INFO">info+</option>
+                <option value="WARN">warn+</option>
+                <option value="ERROR">error</option>
+              </select>
+              <button
+                className="btn small"
+                onClick={() => setPaused((p) => !p)}
+                title={paused ? "Resume auto-scroll" : "Pause auto-scroll"}
+              >
+                {paused ? "Resume" : "Pause"}
+              </button>
+              <button className="btn small" onClick={onClearLogs} title="Clear visible logs">
+                Clear
+              </button>
+              <button
+                className="btn small"
+                onClick={onOpenLogFile}
+                disabled={!logFile}
+                title={logFile || "Log file unavailable"}
+              >
+                Open file
+              </button>
+            </div>
+          </div>
+          <div className="logs-filters">
+            {[...EVENT_GROUPS, "other"].map((g) => (
+              <button
+                key={g}
+                className={`chip ${activeGroups.has(g as EventGroup | "other") ? "on" : ""}`}
+                onClick={() => toggleGroup(g as EventGroup | "other")}
+              >
+                {g}
+              </button>
+            ))}
+          </div>
           <div className="card-body">
-            <div className={`activity ${logs.length === 0 ? "empty" : ""}`} ref={activityRef}>
-              {logs.length === 0
-                ? "(no events yet)"
-                : logs.map((e, i) => (
-                    <span key={i} className="activity-line">
-                      <span className="activity-time">
-                        {new Date(e.time).toLocaleTimeString()}
-                      </span>
-                      <span className={`activity-type ${e.type}`}>{e.type}</span>{" "}
-                      {e.message ?? ""}
-                    </span>
-                  ))}
+            <div className={`logs ${filtered.length === 0 ? "empty" : ""}`} ref={logsRef}>
+              {filtered.length === 0 ? (
+                <div className="logs-empty">(no events match filter)</div>
+              ) : (
+                filtered.map((r, i) => <LogRow key={i} record={r} />)
+              )}
             </div>
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+function LogRow({ record }: { record: LogRecord }) {
+  const time = new Date(record.time).toLocaleTimeString();
+  const group = eventGroup(record.event);
+  return (
+    <div className={`log-row level-${record.level.toLowerCase()} group-${group}`}>
+      <span className="log-time">{time}</span>
+      <span className={`log-level lvl-${record.level.toLowerCase()}`}>{record.level}</span>
+      <span className="log-event">{record.event}</span>
+      <span className="log-attrs">{formatAttrs(record.attrs)}</span>
+    </div>
+  );
+}
+
+function formatAttrs(attrs: Record<string, unknown> | undefined): string {
+  if (!attrs) return "";
+  return Object.entries(attrs)
+    .map(([k, v]) => `${k}=${formatValue(v)}`)
+    .join(" ");
+}
+
+function formatValue(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v.includes(" ") ? `"${v}"` : v;
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
 }

@@ -1,12 +1,17 @@
 // Package service provides a desktop-shaped wrapper around the s2-sync
-// core. It exposes a context-driven Start/Stop/Status/Subscribe API so
-// GUI hosts (Wails app, future daemon) can drive sync without going
-// through the CLI's stdout/signal-based plumbing.
+// core. It exposes a context-driven Start/Stop/Status API so GUI hosts
+// (Wails app, future daemon) can drive sync without going through the
+// CLI's stdout/signal-based plumbing.
+//
+// All event reporting flows through *slog.Logger (DI'd by the caller).
+// The frontend learns of state changes by either polling Status() or
+// reacting to log records emitted via the Wails sink.
 package service
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	stdsync "sync"
@@ -14,6 +19,7 @@ import (
 
 	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	s2sync "github.com/selfbase-dev/s2-sync/internal/sync"
 )
 
@@ -44,6 +50,7 @@ const (
 
 type SyncService struct {
 	endpoint     string
+	logger       *slog.Logger
 	pollInterval time.Duration
 	debounce     time.Duration
 
@@ -51,58 +58,36 @@ type SyncService struct {
 	state  StateInfo
 	cancel context.CancelFunc
 	done   chan struct{}
-
-	subMu       stdsync.Mutex
-	subscribers []chan Event
 }
 
-func New(endpoint string) *SyncService {
+// New constructs a SyncService. logger may be nil (defaults to slog.Default).
+func New(endpoint string, logger *slog.Logger) *SyncService {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &SyncService{
 		endpoint:     endpoint,
+		logger:       logger,
 		pollInterval: defaultPollInterval,
 		debounce:     defaultDebounce,
 		state:        StateInfo{Status: StatusIdle},
 	}
 }
 
-// Status returns a snapshot of the current sync state.
 func (s *SyncService) Status() StateInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state
 }
 
-// Subscribe returns a channel of events. The caller should drain the
-// channel; events are dropped (oldest first) if the buffer fills.
-func (s *SyncService) Subscribe() <-chan Event {
-	ch := make(chan Event, 32)
-	s.subMu.Lock()
-	s.subscribers = append(s.subscribers, ch)
-	s.subMu.Unlock()
-	return ch
-}
-
-func (s *SyncService) emit(ev Event) {
-	if ev.Time.IsZero() {
-		ev.Time = time.Now()
-	}
-	s.subMu.Lock()
-	subs := append([]chan Event(nil), s.subscribers...)
-	s.subMu.Unlock()
-	for _, ch := range subs {
-		select {
-		case ch <- ev:
-		default:
-		}
-	}
-}
+func (s *SyncService) Logger() *slog.Logger { return s.logger }
 
 func (s *SyncService) setError(err error) {
 	s.mu.Lock()
 	s.state.Status = StatusError
 	s.state.Error = err.Error()
 	s.mu.Unlock()
-	s.emit(Event{Type: EventError, Message: err.Error()})
+	s.logger.Error(slog2.SyncError, "err", err.Error())
 }
 
 func (s *SyncService) markSynced() {
@@ -114,16 +99,14 @@ func (s *SyncService) markSynced() {
 		s.state.Error = ""
 	}
 	s.mu.Unlock()
-	s.emit(Event{Type: EventSynced, Time: now})
+	s.logger.Info(slog2.SyncDone)
 }
 
 // Start begins watching the given mount. Returns immediately; sync runs
 // in a background goroutine until Stop is called or ctx is cancelled.
 //
-// Admission is atomic: the state, cancel, and done channel are claimed
-// under the lock before any network or disk I/O. A concurrent Start
-// always sees StatusRunning and returns an error. On setup failure the
-// slot is released (Idle) and done is closed so Wait() unblocks.
+// Admission is atomic: state, cancel, and done channel are claimed under
+// the lock before any I/O. Concurrent Starts always see StatusRunning.
 func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -138,9 +121,6 @@ func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 		s.mu.Unlock()
 		return fmt.Errorf("still stopping; try again shortly")
 	}
-	// Claim the slot atomically — derive the cancel/done under the
-	// same lock that transitions status, so a concurrent Start always
-	// sees StatusRunning by the time it acquires the mutex.
 	runCtx, cancel := context.WithCancel(ctx)
 	s.state = StateInfo{Status: StatusRunning, Mount: &mount}
 	s.cancel = cancel
@@ -192,7 +172,7 @@ func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 
 	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
 
-	s.emit(Event{Type: EventStarted, Mount: &mount})
+	s.logger.Info(slog2.ServiceStart, "mount", mount.Path)
 
 	// Bind the client to runCtx so Stop's cancel aborts any in-flight
 	// HTTP request (Bootstrap / Pull / Push etc.).
@@ -200,10 +180,6 @@ func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 	return nil
 }
 
-// Stop signals the running sync to cancel and returns immediately. The
-// goroutine continues until the in-flight sync round (if any) completes,
-// then transitions Status to Idle and emits EventStopped. No-op if not
-// running. Use Wait if a caller needs to block until fully stopped.
 func (s *SyncService) Stop() error {
 	s.mu.Lock()
 	if s.state.Status != StatusRunning && s.state.Status != StatusError {
@@ -217,12 +193,10 @@ func (s *SyncService) Stop() error {
 	if cancel != nil {
 		cancel()
 	}
-	s.emit(Event{Type: EventLog, Message: "stop requested..."})
+	s.logger.Info(slog2.ServiceStop, "phase", "requested")
 	return nil
 }
 
-// Wait blocks until any in-flight sync goroutine has fully exited. Used
-// by tests; production callers prefer Stop's fire-and-forget semantics.
 func (s *SyncService) Wait() {
 	s.mu.Lock()
 	done := s.done

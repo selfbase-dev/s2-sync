@@ -11,6 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	s2sync "github.com/selfbase-dev/s2-sync/internal/sync"
 )
 
@@ -26,13 +27,12 @@ func (s *SyncService) run(ctx context.Context, c *client.Client, state *s2sync.S
 			s.state.Status = StatusIdle
 		}
 		s.mu.Unlock()
-		s.emit(Event{Type: EventStopped})
+		s.logger.Info(slog2.ServiceStop, "phase", "stopped")
 	}()
 
 	var syncMu stdsync.Mutex
-	logSink := newLogSink(s)
 	mkOpts := func() s2sync.SyncOptions {
-		return s2sync.SyncOptions{Stdout: logSink, Stderr: logSink}
+		return s2sync.SyncOptions{Logger: s.logger}
 	}
 
 	doSync := func() error {
@@ -44,7 +44,7 @@ func (s *SyncService) run(ctx context.Context, c *client.Client, state *s2sync.S
 		return s2sync.RunIncrementalSync(c, localDir, remotePrefix, state, mkOpts())
 	}
 
-	s.emit(Event{Type: EventLog, Message: "running initial sync..."})
+	s.logger.Info(slog2.SyncStart, "phase", "initial")
 	if err := doSync(); err != nil {
 		// A user-initiated Stop cancels the client's ctx, which surfaces
 		// as a transport error in the sync runner. Treat it as a clean

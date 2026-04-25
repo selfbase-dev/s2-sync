@@ -185,7 +185,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	// race the shared *sql.DB handle.
 
 	// Initial full sync
-	fmt.Fprintln(cmd.OutOrStdout(), "Running initial sync...")
+	Logger().Info("sync.start", "phase", "initial")
 	if err := doSync(cmd, localDir, remotePrefix, c, state, &syncMu); err != nil {
 		state.Close()
 		return fmt.Errorf("initial sync failed: %w", err)
@@ -213,8 +213,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	localChanged := make(chan struct{}, 1)
 	go filterFsEventsWithAutoWatch(watcher, localDir, exclude, localChanged)
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Watching %s ↔ %s (poll every %s, Ctrl+C to stop)\n",
-		localDir, remotePrefix, watchPollInterval)
+	Logger().Info("watch.start",
+		"local", localDir,
+		"remote", remotePrefix,
+		"poll_interval", watchPollInterval.String(),
+	)
 
 	pollFn := func() (bool, bool, error) {
 		syncMu.Lock()
@@ -266,7 +269,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}()
 
 	<-sigCh
-	fmt.Fprintln(cmd.OutOrStdout(), "\nShutting down...")
+	Logger().Info("service.stop", "phase", "requested")
 	cancel()
 	<-loopDone
 	// Drain any sync that slipped past the ctx check — Lock blocks
@@ -279,14 +282,11 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	return closeErr
 }
 
-func doSync(cmd *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State, mu *sync.Mutex) error {
+func doSync(_ *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State, mu *sync.Mutex) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	opts := s2sync.SyncOptions{
-		Stdout: cmd.OutOrStdout(),
-		Stderr: cmd.ErrOrStderr(),
-	}
+	opts := s2sync.SyncOptions{Logger: Logger()}
 
 	if state.Cursor == "" {
 		return s2sync.RunInitialSync(c, localDir, remotePrefix, state, opts)

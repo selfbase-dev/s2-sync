@@ -189,6 +189,33 @@ func (a *App) SetAutostart(enabled bool) error {
 	return service.SetAutostart(enabled, exe)
 }
 
+// --- Logs ---
+
+// LogFile returns the absolute path to the JSON Lines log file. Empty
+// if the file sink failed to open at startup.
+func (a *App) LogFile() string {
+	return a.logFile
+}
+
+// OpenLogFile reveals the log file in the OS file manager.
+func (a *App) OpenLogFile() error {
+	if a.logFile == "" {
+		return nil
+	}
+	return openInFileManager(a.logFile)
+}
+
+// RecentLogs returns the last n records from the log file as raw JSON
+// lines (most recent last). The frontend uses this to repopulate the
+// Logs panel after a reload so trouble-shooting context survives across
+// app restarts.
+func (a *App) RecentLogs(n int) ([]string, error) {
+	if a.logFile == "" || n <= 0 {
+		return nil, nil
+	}
+	return tailFile(a.logFile, n)
+}
+
 // --- Misc ---
 
 // Endpoint returns the configured S2 endpoint URL.

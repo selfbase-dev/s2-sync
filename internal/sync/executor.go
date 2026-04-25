@@ -3,10 +3,12 @@ package sync
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -21,10 +23,19 @@ type ExecuteResult struct {
 	Errors    []error
 }
 
-// executeDeps holds unexported seams for testing timing-dependent behavior.
-// Production code always uses the zero value (all fields nil).
+// executeDeps holds unexported seams for testing timing-dependent behavior
+// and the logger. Production code (cmd, service) reaches Execute via the
+// runner, which threads opts.Logger in.
 type executeDeps struct {
 	beforePullCommit func(localPath string)
+	logger           *slog.Logger
+}
+
+func (d executeDeps) log() *slog.Logger {
+	if d.logger != nil {
+		return d.logger
+	}
+	return slog.Default()
 }
 
 // Execute applies the sync plans against local filesystem and remote storage.
@@ -49,6 +60,7 @@ func execute(
 	deps executeDeps,
 ) (*ExecuteResult, error) {
 	result := &ExecuteResult{}
+	log := deps.log()
 
 	for _, plan := range plans {
 		localPath, err := safeJoin(localRoot, plan.Path)
@@ -61,7 +73,7 @@ func execute(
 		switch plan.Action {
 		case types.Push:
 			if dryRun {
-				fmt.Printf("[dry-run] push: %s\n", plan.Path)
+				log.Info(slog2.FilePush, "path", plan.Path, "dry_run", true)
 				result.Pushed++
 				continue
 			}
@@ -70,11 +82,11 @@ func execute(
 				continue
 			}
 			result.Pushed++
-			fmt.Printf("pushed: %s\n", plan.Path)
+			log.Info(slog2.FilePush, "path", plan.Path)
 
 		case types.Pull:
 			if dryRun {
-				fmt.Printf("[dry-run] pull: %s\n", plan.Path)
+				log.Info(slog2.FilePull, "path", plan.Path, "dry_run", true)
 				result.Pulled++
 				continue
 			}
@@ -90,11 +102,11 @@ func execute(
 				continue
 			}
 			result.Pulled++
-			fmt.Printf("pulled: %s\n", plan.Path)
+			log.Info(slog2.FilePull, "path", plan.Path)
 
 		case types.DeleteLocal:
 			if dryRun {
-				fmt.Printf("[dry-run] delete local: %s\n", plan.Path)
+				log.Info(slog2.FileDelete, "path", plan.Path, "side", "local", "dry_run", true)
 				result.Deleted++
 				continue
 			}
@@ -104,11 +116,11 @@ func execute(
 			}
 			state.DeleteFile(plan.Path)
 			result.Deleted++
-			fmt.Printf("deleted local: %s\n", plan.Path)
+			log.Info(slog2.FileDelete, "path", plan.Path, "side", "local")
 
 		case types.DeleteRemote:
 			if dryRun {
-				fmt.Printf("[dry-run] delete remote: %s\n", plan.Path)
+				log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote", "dry_run", true)
 				result.Deleted++
 				continue
 			}
@@ -122,11 +134,11 @@ func execute(
 			}
 			state.DeleteFile(plan.Path)
 			result.Deleted++
-			fmt.Printf("deleted remote: %s\n", plan.Path)
+			log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote")
 
 		case types.Conflict:
 			if dryRun {
-				fmt.Printf("[dry-run] conflict: %s\n", plan.Path)
+				log.Info(slog2.FileConflict, "path", plan.Path, "dry_run", true)
 				result.Conflicts++
 				continue
 			}
@@ -138,7 +150,7 @@ func execute(
 
 		case types.PreserveLocalRename:
 			if dryRun {
-				fmt.Printf("[dry-run] preserve-local-rename: %s\n", plan.Path)
+				log.Info(slog2.FileConflict, "path", plan.Path, "kind", "preserve_local_rename", "dry_run", true)
 				result.Conflicts++
 				continue
 			}
@@ -153,7 +165,7 @@ func execute(
 			// plan.From = archive/remote source, plan.Path = destination.
 			// Atomic server MOVE preserves revision history.
 			if dryRun {
-				fmt.Printf("[dry-run] move: %s → %s\n", plan.From, plan.Path)
+				log.Info(slog2.FileMove, "from", plan.From, "to", plan.Path, "dry_run", true)
 				result.Moved++
 				continue
 			}
@@ -165,7 +177,7 @@ func execute(
 					// not delete+push fallback. Leave archive pointing at From
 					// so we keep tracking the source; the user must resolve.
 					result.Skipped++
-					fmt.Printf("skip (case conflict): %s → %s (destination exists on server)\n", plan.From, plan.Path)
+					log.Warn(slog2.FileSkip, "from", plan.From, "to", plan.Path, "reason", "case_conflict_remote_exists")
 					continue
 				}
 				result.Errors = append(result.Errors, fmt.Errorf("move %s → %s: %w", plan.From, plan.Path, err))
@@ -182,7 +194,7 @@ func execute(
 				}
 			}
 			result.Moved++
-			fmt.Printf("moved: %s → %s\n", plan.From, plan.Path)
+			log.Info(slog2.FileMove, "from", plan.From, "to", plan.Path)
 
 		case types.MoveApply:
 			// Pull side of a case-only rename / file move.
@@ -191,7 +203,7 @@ func execute(
 			// case-insensitive FS (Mac/Win) where delete+download of
 			// the same inode would race and corrupt the file.
 			if dryRun {
-				fmt.Printf("[dry-run] move-apply: %s → %s\n", plan.From, plan.Path)
+				log.Info(slog2.FileMove, "from", plan.From, "to", plan.Path, "side", "local", "dry_run", true)
 				result.Moved++
 				continue
 			}
@@ -210,19 +222,19 @@ func execute(
 			}
 			state.MoveFile(plan.From, plan.Path)
 			result.Moved++
-			fmt.Printf("move-apply: %s → %s\n", plan.From, plan.Path)
+			log.Info(slog2.FileMove, "from", plan.From, "to", plan.Path, "side", "local")
 
 		case types.SkipCaseConflict:
 			// terminal state — do not touch local or remote.
 			// Leave archive alone so the collision is re-detected next
 			// sync (warning debounce in state prevents log spam).
 			if dryRun {
-				fmt.Printf("[dry-run] skip (case conflict): %s\n", plan.Path)
+				log.Info(slog2.FileSkip, "path", plan.Path, "reason", "case_conflict", "dry_run", true)
 				result.Skipped++
 				continue
 			}
 			result.Skipped++
-			fmt.Printf("skip (case conflict): %s\n", plan.Path)
+			log.Warn(slog2.FileSkip, "path", plan.Path, "reason", "case_conflict")
 		}
 	}
 

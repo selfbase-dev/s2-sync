@@ -49,13 +49,15 @@ func main() {
 		},
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
 		OnStartup:        app.startup,
-		OnShutdown: func(_ context.Context) {
+		OnShutdown: func(ctx context.Context) {
 			// Graceful shutdown: signal sync to stop, wait for the
 			// run goroutine to drain so state.Close happens before the
-			// process exits. Then tear down the tray.
+			// process exits. Then tear down the tray and close the log
+			// file fd.
 			_ = app.svc.Stop()
 			app.svc.Wait()
 			stopTray()
+			app.shutdown(ctx)
 		},
 		Bind: []interface{}{
 			app,

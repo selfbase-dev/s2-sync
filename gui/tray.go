@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"time"
 
 	"fyne.io/systray"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -62,11 +63,19 @@ func onTrayReady(app *App) {
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit S2 Sync", "Exit")
 
-	// Keep tray label/visibility in sync with service events.
+	// Keep tray label/visibility in sync with service status. Polling
+	// at 1Hz is cheap and avoids wiring a second observer mechanism on
+	// SyncService now that all state changes route through *slog.Logger.
 	go func() {
-		ch := app.svc.Subscribe()
-		for range ch {
-			refreshTray(app, mStatus, mStart, mStop)
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		var last service.Status
+		for range t.C {
+			cur := app.svc.Status().Status
+			if cur != last {
+				last = cur
+				refreshTray(app, mStatus, mStart, mStop)
+			}
 		}
 	}()
 

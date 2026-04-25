@@ -79,14 +79,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 		DryRun:       dryRun,
 		Force:        force,
 		MaxDeletePct: maxDelete,
-		Stdout:       cmd.OutOrStdout(),
-		Stderr:       cmd.ErrOrStderr(),
+		Logger:       Logger(),
 	}
 
 	if state.Cursor == "" {
-		fmt.Fprintln(cmd.OutOrStdout(), "Running initial sync...")
+		Logger().Info("sync.start", "phase", "initial")
 		return s2sync.RunInitialSync(c, localDir, remotePrefix, state, opts)
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), "Checking for changes...")
+	Logger().Info("sync.start", "phase", "incremental")
 	return s2sync.RunIncrementalSync(c, localDir, remotePrefix, state, opts)
 }
