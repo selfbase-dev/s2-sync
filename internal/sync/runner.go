@@ -4,9 +4,10 @@ package sync
 
 import (
 	"fmt"
-	"io"
+	"log/slog"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -16,16 +17,16 @@ type SyncOptions struct {
 	DryRun       bool
 	Force        bool
 	MaxDeletePct int // 0 = no limit; abort if deletes exceed this %
-	Stdout       io.Writer
-	Stderr       io.Writer
+	// Logger receives every structured event the sync engine emits.
+	// Required (nil falls back to slog.Default()).
+	Logger *slog.Logger
 }
 
-func (o SyncOptions) printf(format string, a ...any) {
-	fmt.Fprintf(o.Stdout, format, a...)
-}
-
-func (o SyncOptions) errorf(format string, a ...any) {
-	fmt.Fprintf(o.Stderr, format, a...)
+func (o SyncOptions) logger() *slog.Logger {
+	if o.Logger != nil {
+		return o.Logger
+	}
+	return slog.Default()
 }
 
 // RunInitialSync orchestrates a full initial sync: clear archive, walk
@@ -50,8 +51,11 @@ func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *Stat
 	reportCollisions(collectCollisions(walkResult.Collisions, remoteCollisions), state, opts)
 
 	prefilled := PrefillArchiveForIdempotentApply(state, localFiles, remoteFiles)
-	opts.printf("Local: %d files, Remote: %d files (%d already in sync)\n",
-		len(localFiles), len(remoteFiles), prefilled)
+	opts.logger().Info(slog2.SyncStart,
+		"local_files", len(localFiles),
+		"remote_files", len(remoteFiles),
+		"already_in_sync", prefilled,
+	)
 
 	plans := Compare(localFiles, remoteFiles, state.Files)
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
@@ -90,7 +94,7 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 
 	resp, err := c.PollChanges(state.Cursor)
 	if err == client.ErrCursorGone {
-		opts.printf("Cursor expired, falling back to full sync...\n")
+		opts.logger().Warn(slog2.SyncStart, "reason", "cursor_expired_falling_back_to_full")
 		state.Cursor = ""
 		return RunInitialSync(c, localDir, remotePrefix, state, opts)
 	}
@@ -142,7 +146,7 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 	hasLocalChanges := HasLocalChanges(localFiles, state.Files)
 
 	if len(plans) == 0 && len(remoteChanges) == 0 && !hasLocalChanges {
-		opts.printf("Everything is in sync.\n")
+		opts.logger().Info(slog2.SyncIdle)
 	}
 
 	result, err := executePlans(plans, localDir, remotePrefix, c, state, opts)
@@ -199,11 +203,15 @@ func reportCollisions(groups []CollisionGroup, state *State, opts SyncOptions) {
 	added, resolved := state.SetReportedCollisions(keys)
 	for _, k := range added {
 		g := byKey[k]
-		opts.errorf("warning: case/unicode collision for %q: %v (syncing %q only)\n",
-			g.Key, g.Paths, g.Paths[0])
+		opts.logger().Warn(slog2.FileConflict,
+			"kind", "case_unicode_collision",
+			"key", g.Key,
+			"paths", g.Paths,
+			"syncing_only", g.Paths[0],
+		)
 	}
 	for _, k := range resolved {
-		opts.printf("resolved: case/unicode collision for %q\n", k)
+		opts.logger().Info(slog2.FileConflict, "kind", "case_unicode_collision_resolved", "key", k)
 	}
 }
 
@@ -233,20 +241,32 @@ func executePlans(plans []types.SyncPlan, localDir, remotePrefix string, c *clie
 	for _, p := range plans {
 		counts[p.Action]++
 	}
-	opts.printf("Plan: %d push, %d pull, %d delete, %d conflict\n",
-		counts[types.Push], counts[types.Pull],
-		counts[types.DeleteLocal]+counts[types.DeleteRemote], counts[types.Conflict])
+	opts.logger().Info(slog2.SyncPlan,
+		"push", counts[types.Push],
+		"pull", counts[types.Pull],
+		"delete", counts[types.DeleteLocal]+counts[types.DeleteRemote],
+		"conflict", counts[types.Conflict],
+		"dry_run", opts.DryRun,
+	)
 
-	result, err := Execute(plans, localDir, remotePrefix, c, state, opts.DryRun)
+	result, err := executeWithLogger(plans, localDir, remotePrefix, c, state, opts.DryRun, opts.logger())
 	if err != nil {
 		return nil, err
 	}
 
 	if len(result.Errors) > 0 {
 		for _, e := range result.Errors {
-			opts.errorf("  error: %v\n", e)
+			opts.logger().Error(slog2.SyncError, "err", e.Error())
 		}
 	}
 
 	return result, nil
 }
+
+// executeWithLogger is a thin wrapper used by runner.go to thread the
+// logger into Execute without breaking the public Execute signature
+// (still used by tests / external callers).
+func executeWithLogger(plans []types.SyncPlan, localRoot, remotePrefix string, c *client.Client, state *State, dryRun bool, logger *slog.Logger) (*ExecuteResult, error) {
+	return execute(plans, localRoot, remotePrefix, c, state, dryRun, executeDeps{logger: logger})
+}
+

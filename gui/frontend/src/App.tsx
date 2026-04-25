@@ -7,7 +7,10 @@ import {
   GetStatus,
   HasValidSession,
   IsAutostartEnabled,
+  LogFile,
+  OpenLogFile,
   PickFolder,
+  RecentLogs,
   SavedFolder,
   SetAutostart,
   SignOut,
@@ -17,7 +20,7 @@ import {
 import { EventsOn } from "../wailsjs/runtime/runtime";
 import { Dashboard } from "./Dashboard";
 import { Welcome } from "./Welcome";
-import { Event, MAX_LOG_LINES, StateInfo } from "./types";
+import { LogRecord, MAX_LOG_LINES, StateInfo } from "./types";
 import "./App.css";
 
 function App() {
@@ -26,13 +29,15 @@ function App() {
   const [folder, setFolder] = useState("");
   const [defaultFolder, setDefaultFolder] = useState("");
   const [state, setState] = useState<StateInfo>({ status: "idle" });
-  const [logs, setLogs] = useState<Event[]>([]);
+  const [logs, setLogs] = useState<LogRecord[]>([]);
+  const [logFile, setLogFilePath] = useState("");
   const [autostart, setAutostartState] = useState(false);
 
   useEffect(() => {
     Endpoint().then(setEndpoint);
     DefaultFolder().then(setDefaultFolder);
     IsAutostartEnabled().then(setAutostartState);
+    LogFile().then(setLogFilePath);
     Promise.all([HasValidSession(), SavedFolder()]).then(([ok, saved]) => {
       setSignedIn(ok);
       if (saved) setFolder(saved);
@@ -41,9 +46,28 @@ function App() {
       setState(s as StateInfo);
       if (s.mount?.path) setFolder(s.mount.path);
     });
-    const off = EventsOn("sync:event", (ev: Event) => {
+    // Repopulate from the file so trouble-shooting context survives a
+    // window reload — the file sink is the source of truth across runs.
+    RecentLogs(MAX_LOG_LINES).then((lines) => {
+      const parsed: LogRecord[] = [];
+      for (const line of lines ?? []) {
+        try {
+          const r = JSON.parse(line);
+          parsed.push({
+            time: r.time,
+            level: (r.level ?? "INFO") as LogRecord["level"],
+            event: r.msg ?? "",
+            attrs: stripMeta(r),
+          });
+        } catch {
+          // ignore malformed line
+        }
+      }
+      if (parsed.length) setLogs(parsed);
+    });
+    const off = EventsOn("log", (rec: LogRecord) => {
       setLogs((prev) => {
-        const next = [...prev, ev];
+        const next = [...prev, rec];
         return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next;
       });
       GetStatus().then((s) => setState(s as StateInfo));
@@ -115,14 +139,29 @@ function App() {
       folder={folder}
       state={state}
       logs={logs}
+      logFile={logFile}
       autostart={autostart}
       onStart={handleStart}
       onStop={handleStop}
       onPickFolder={handlePickFolder}
       onAutostartChange={handleAutostart}
       onDisconnect={handleDisconnect}
+      onClearLogs={() => setLogs([])}
+      onOpenLogFile={() => OpenLogFile()}
     />
   );
+}
+
+// stripMeta returns the attribute fields of a slog JSON record, dropping
+// the framework keys so the LogRecord.attrs map matches what the live
+// Wails callback delivers.
+function stripMeta(r: Record<string, unknown>): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(r)) {
+    if (k === "time" || k === "level" || k === "msg") continue;
+    out[k] = r[k];
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 export default App;
