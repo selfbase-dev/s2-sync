@@ -20,7 +20,6 @@ func (c *Client) PollChanges(cursor string) (*types.ChangesResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -48,7 +47,6 @@ func (c *Client) LatestCursor() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

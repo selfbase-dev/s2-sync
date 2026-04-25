@@ -21,7 +21,6 @@ func (c *Client) Snapshot(path string) (*types.SnapshotResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -52,7 +51,6 @@ func (c *Client) DownloadRevision(revisionID string) (*DownloadResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

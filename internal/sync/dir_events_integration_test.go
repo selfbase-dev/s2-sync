@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
@@ -58,7 +59,7 @@ func fakeBootstrapServer(t *testing.T, snapshot types.SnapshotResponse, latestCu
 // mkdir → os.MkdirAll, no plans, no network traffic.
 func TestHandleIncrementalDirEvents_Mkdir(t *testing.T) {
 	dir := t.TempDir()
-	c := client.New("http://invalid", "s2_test") // should never be called
+	c := client.New("http://invalid", auth.NewStaticSource("s2_test")) // should never be called
 	archive := map[string]types.FileState{}
 
 	changes := []types.ChangeEntry{
@@ -84,7 +85,7 @@ func TestHandleIncrementalDirEvents_Mkdir(t *testing.T) {
 // produces DeleteLocal plans for untouched files.
 func TestHandleIncrementalDirEvents_DeleteInScope(t *testing.T) {
 	dir := t.TempDir()
-	c := client.New("http://invalid", "s2_test")
+	c := client.New("http://invalid", auth.NewStaticSource("s2_test"))
 	h1 := writeLocalFileExpectHash(t, dir, "vacation/a.jpg", "a-bytes")
 	h2 := writeLocalFileExpectHash(t, dir, "vacation/sub/b.jpg", "b-bytes")
 	h3 := writeLocalFileExpectHash(t, dir, "photos/keep.jpg", "k-bytes")
@@ -119,7 +120,7 @@ func TestHandleIncrementalDirEvents_DeleteInScope(t *testing.T) {
 // cases #2/#3/#8/#9: `delete /` sweeps every archive entry.
 func TestHandleIncrementalDirEvents_DeleteScopeWide(t *testing.T) {
 	dir := t.TempDir()
-	c := client.New("http://invalid", "s2_test")
+	c := client.New("http://invalid", auth.NewStaticSource("s2_test"))
 	h1 := writeLocalFileExpectHash(t, dir, "a.txt", "a")
 	h2 := writeLocalFileExpectHash(t, dir, "b/c.txt", "c")
 
@@ -144,7 +145,7 @@ func TestHandleIncrementalDirEvents_DeleteScopeWide(t *testing.T) {
 // scope-internal move renames archive entries + local files.
 func TestHandleIncrementalDirEvents_MoveInScope(t *testing.T) {
 	dir := t.TempDir()
-	c := client.New("http://invalid", "s2_test")
+	c := client.New("http://invalid", auth.NewStaticSource("s2_test"))
 	h := writeLocalFileExpectHash(t, dir, "old/a.txt", "content")
 
 	archive := map[string]types.FileState{
@@ -193,7 +194,7 @@ func TestHandleIncrementalDirEvents_PutSubtreeSnapshot(t *testing.T) {
 		},
 	})
 	defer srv.Close()
-	c := client.New(srv.URL, "s2_test")
+	c := client.New(srv.URL, auth.NewStaticSource("s2_test"))
 
 	archive := map[string]types.FileState{}
 
@@ -243,7 +244,7 @@ func TestHandleIncrementalDirEvents_PutScopeRootReplacesCursor(t *testing.T) {
 	}
 	srv := fakeBootstrapServer(t, snapshot, "cursor_s0")
 	defer srv.Close()
-	c := client.New(srv.URL, "s2_test")
+	c := client.New(srv.URL, auth.NewStaticSource("s2_test"))
 
 	archive := map[string]types.FileState{}
 
@@ -286,7 +287,7 @@ func TestHandleIncrementalDirEvents_PutScopeRootClearsStalePlans(t *testing.T) {
 	}
 	srv := fakeBootstrapServer(t, snapshot, "cursor_s0")
 	defer srv.Close()
-	c := client.New(srv.URL, "s2_test")
+	c := client.New(srv.URL, auth.NewStaticSource("s2_test"))
 
 	changes := []types.ChangeEntry{
 		{Action: "delete", IsDir: true, PathBefore: "/foo"},
@@ -343,7 +344,7 @@ func TestHandleIncrementalDirEvents_PutSubtree413Fallback(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := client.New(srv.URL, "s2_test")
+	c := client.New(srv.URL, auth.NewStaticSource("s2_test"))
 
 	archive := map[string]types.FileState{}
 	changes := []types.ChangeEntry{
@@ -385,7 +386,7 @@ func TestHandleIncrementalDirEvents_PutSubtree413Then404(t *testing.T) {
 		w.WriteHeader(404)
 	}))
 	defer srv.Close()
-	c := client.New(srv.URL, "s2_test")
+	c := client.New(srv.URL, auth.NewStaticSource("s2_test"))
 
 	changes := []types.ChangeEntry{
 		{Action: "put", IsDir: true, PathAfter: "/vanished"},
@@ -409,7 +410,7 @@ func TestHandleIncrementalDirEvents_PutSubtreeDeletedRace(t *testing.T) {
 		w.WriteHeader(404)
 	}))
 	defer srv.Close()
-	c := client.New(srv.URL, "s2_test")
+	c := client.New(srv.URL, auth.NewStaticSource("s2_test"))
 
 	changes := []types.ChangeEntry{
 		{Action: "put", IsDir: true, PathAfter: "/gone"},
@@ -432,7 +433,7 @@ func TestHandleIncrementalDirEvents_PutSubtreeDeletedRace(t *testing.T) {
 // sync root.
 func TestHandleIncrementalDirEvents_PathTraversalRejected(t *testing.T) {
 	dir := t.TempDir()
-	c := client.New("http://invalid", "s2_test")
+	c := client.New("http://invalid", auth.NewStaticSource("s2_test"))
 	archive := map[string]types.FileState{}
 
 	changes := []types.ChangeEntry{
@@ -449,7 +450,7 @@ func TestHandleIncrementalDirEvents_PathTraversalRejected(t *testing.T) {
 // prefix must be preserved as a conflict copy, not resurrected.
 func TestHandleIncrementalDirEvents_DeleteWithUntrackedDescendant(t *testing.T) {
 	dir := t.TempDir()
-	c := client.New("http://invalid", "s2_test")
+	c := client.New("http://invalid", auth.NewStaticSource("s2_test"))
 	h := writeLocalFileExpectHash(t, dir, "docs/tracked.txt", "t")
 	writeLocalFile(t, dir, "docs/untracked.txt", "u")
 

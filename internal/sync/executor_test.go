@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
@@ -18,7 +19,7 @@ func testServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *clie
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return srv, client.New(srv.URL, "s2_test")
+	return srv, client.New(srv.URL, auth.NewStaticSource("s2_test"))
 }
 
 // Regression for SELF-444: remotePrefix without trailing slash must still

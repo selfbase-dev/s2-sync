@@ -169,12 +169,12 @@ func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 		return fail(fmt.Errorf("create .s2ignore: %w", err))
 	}
 
-	token, err := auth.LoadToken()
+	source, err := auth.NewSource(s.endpoint)
 	if err != nil {
 		return fail(err)
 	}
 
-	c := client.New(s.endpoint, token)
+	c := client.New(s.endpoint, source)
 	me, err := c.Me()
 	if err != nil {
 		return fail(fmt.Errorf("auth: %w", err))

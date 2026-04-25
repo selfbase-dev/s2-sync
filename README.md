@@ -45,12 +45,14 @@ On Windows: `Get-FileHash .\s2sync_windows_amd64.zip -Algorithm SHA256` and comp
 ## CLI usage
 
 ```sh
-s2 login                # interactive; or set S2_TOKEN
+s2 login                # opens your browser for OAuth sign-in
 s2 sync  ./local-dir    # one-shot bidirectional sync
 s2 watch ./local-dir    # continuous
 ```
 
-The sync root is the token's `base_path` — root or scoped tokens both work. To sync a different scope, issue a new token. Add `.s2ignore` to exclude patterns.
+`s2 login` runs the OAuth 2.1 + PKCE + loopback flow: a one-shot HTTP listener binds to `127.0.0.1:<random-port>`, your browser opens to consent at the S2 endpoint, and the issued tokens are stored in your OS keychain. Set `S2_TOKEN=s2_xxx` (or `--token`) to bypass OAuth for CI / scripts — that path uses a fixed token and does not auto-refresh.
+
+The sync root is the grant's `base_path` — root or scoped grants both work. To sync a different scope, re-consent with different paths in the dashboard. Add `.s2ignore` to exclude patterns.
 
 ## Develop
 

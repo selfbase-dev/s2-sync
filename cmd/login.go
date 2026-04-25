@@ -1,13 +1,11 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
-	"os"
-	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/oauth"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -15,7 +13,7 @@ import (
 var loginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "Authenticate with S2",
-	Long:  "Store an S2 API token for future use. Get your token from the S2 dashboard.",
+	Long:  "Sign in with your S2 account via OAuth. Opens your browser to complete consent.",
 	RunE:  runLogin,
 }
 
@@ -24,53 +22,28 @@ func init() {
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
-	fmt.Fprint(cmd.OutOrStdout(), "Enter your S2 token (s2_...): ")
-
-	reader := bufio.NewReader(os.Stdin)
-	token, err := reader.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("failed to read token: %w", err)
-	}
-	token = strings.TrimSpace(token)
-
-	if !strings.HasPrefix(token, "s2_") {
-		return fmt.Errorf("invalid token: must start with s2_")
-	}
-
-	// Validate token by calling /api/me
 	endpoint := viper.GetString("endpoint")
-	c := client.New(endpoint, token)
-	me, err := c.Me()
+	fmt.Fprintf(cmd.OutOrStdout(), "Opening %s in your browser to sign in...\n", endpoint)
+
+	tr, err := oauth.Login(cmd.Context(), endpoint)
 	if err != nil {
-		return fmt.Errorf("token validation failed: %w", err)
+		return fmt.Errorf("sign-in failed: %w", err)
 	}
 
-	// Store in keyring
-	if err := auth.SetKeyring(token); err != nil {
-		// Fallback: store in config file
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: keyring unavailable (%v), storing in config file\n", err)
-		viper.Set("token", token)
-		dir, err := ensureConfigDir()
-		if err != nil {
-			return err
-		}
-		if err := viper.WriteConfigAs(dir + "/config.toml"); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
-		}
+	if err := auth.SaveSession(endpoint, tr); err != nil {
+		return fmt.Errorf("save session: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Login successful! (token: %s, user: %s)\n", me.TokenID, me.UserID)
+	// Verify by hitting /api/me with the freshly-issued access token.
+	source, err := auth.NewSource(endpoint)
+	if err != nil {
+		return err
+	}
+	me, err := client.New(endpoint, source).Me()
+	if err != nil {
+		return fmt.Errorf("verify: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Signed in as %s (token %s)\n", me.UserID, me.TokenID)
 	return nil
-}
-
-func ensureConfigDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := home + "/.config/s2"
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", err
-	}
-	return dir, nil
 }

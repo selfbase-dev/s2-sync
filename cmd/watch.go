@@ -154,13 +154,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create .s2ignore: %w", err)
 	}
 
-	token, err := auth.LoadToken()
+	endpoint := viper.GetString("endpoint")
+	source, err := auth.NewSource(endpoint)
 	if err != nil {
 		return err
 	}
-
-	endpoint := viper.GetString("endpoint")
-	c := client.New(endpoint, token)
+	c := client.New(endpoint, source)
 
 	me, err := c.Me()
 	if err != nil {

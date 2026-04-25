@@ -1,16 +1,16 @@
 import { useEffect, useState } from "react";
 import {
-  ClearToken,
   ConfirmDisconnect,
   DefaultFolder,
   EnsureFolder,
   Endpoint,
   GetStatus,
-  HasToken,
+  HasValidSession,
   IsAutostartEnabled,
   PickFolder,
   SavedFolder,
   SetAutostart,
+  SignOut,
   StartSync,
   StopSync,
 } from "../wailsjs/go/main/App";
@@ -22,7 +22,7 @@ import "./App.css";
 
 function App() {
   const [endpoint, setEndpoint] = useState("");
-  const [hasToken, setHasToken] = useState<boolean | null>(null);
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const [folder, setFolder] = useState("");
   const [defaultFolder, setDefaultFolder] = useState("");
   const [state, setState] = useState<StateInfo>({ status: "idle" });
@@ -33,8 +33,8 @@ function App() {
     Endpoint().then(setEndpoint);
     DefaultFolder().then(setDefaultFolder);
     IsAutostartEnabled().then(setAutostartState);
-    Promise.all([HasToken(), SavedFolder()]).then(([hasTok, saved]) => {
-      setHasToken(hasTok);
+    Promise.all([HasValidSession(), SavedFolder()]).then(([ok, saved]) => {
+      setSignedIn(ok);
       if (saved) setFolder(saved);
     });
     GetStatus().then((s) => {
@@ -84,25 +84,25 @@ function App() {
   const handleDisconnect = async () => {
     const ok = await ConfirmDisconnect();
     if (!ok) return;
-    await ClearToken();
-    setHasToken(false);
+    await SignOut();
+    setSignedIn(false);
     setFolder("");
     setState({ status: "idle" });
     setLogs([]);
   };
 
-  if (hasToken === null) {
+  if (signedIn === null) {
     return <div className="app" />;
   }
 
-  if (!hasToken) {
+  if (!signedIn) {
     return (
       <Welcome
         endpoint={endpoint}
         defaultFolder={defaultFolder}
         initialFolder={folder || defaultFolder}
         onConnected={(f) => {
-          setHasToken(true);
+          setSignedIn(true);
           setFolder(f);
         }}
       />

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
+	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -30,13 +31,14 @@ var (
 // Client talks to the S2 REST API.
 type Client struct {
 	endpoint   string
-	token      string
 	httpClient *http.Client
 	ctx        context.Context
 }
 
-// New creates a new S2 client.
-func New(endpoint, token string) *Client {
+// New creates a new S2 client. The Source is consulted (and refreshed
+// when needed) on each outgoing request via the bearer round-tripper —
+// individual API methods do not need to inject the Authorization header.
+func New(endpoint string, source auth.Source) *Client {
 	retryClient := retryablehttp.NewClient()
 	retryClient.RetryMax = 3
 	retryClient.RetryWaitMin = 500 * time.Millisecond
@@ -52,12 +54,34 @@ func New(endpoint, token string) *Client {
 		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
 	}
 
+	std := retryClient.StandardClient()
+	std.Transport = &bearerTransport{base: std.Transport, source: source}
+
 	return &Client{
 		endpoint:   strings.TrimRight(endpoint, "/"),
-		token:      token,
-		httpClient: retryClient.StandardClient(),
+		httpClient: std,
 		ctx:        context.Background(),
 	}
+}
+
+// bearerTransport injects `Authorization: Bearer <token>` into every
+// outgoing request. The token is fetched fresh from the Source so a
+// long-running sync transparently picks up rotated credentials. The
+// Source serializes refreshes internally, so concurrent requests
+// during expiry won't trigger refresh-token reuse detection.
+type bearerTransport struct {
+	base   http.RoundTripper
+	source auth.Source
+}
+
+func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tok, err := t.source.Token(req.Context())
+	if err != nil {
+		return nil, err
+	}
+	req2 := req.Clone(req.Context())
+	req2.Header.Set("Authorization", "Bearer "+tok)
+	return t.base.RoundTrip(req2)
 }
 
 // WithContext returns a shallow copy of the client that attaches ctx to
@@ -74,10 +98,6 @@ func (c *Client) reqContext() context.Context {
 		return c.ctx
 	}
 	return context.Background()
-}
-
-func (c *Client) setAuth(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+c.token)
 }
 
 func (c *Client) url(path string) string {
@@ -119,7 +139,6 @@ func (c *Client) Me() (*types.MeTokenResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

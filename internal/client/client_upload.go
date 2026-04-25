@@ -35,7 +35,6 @@ func (c *Client) CreateUploadSession(path string, totalSize int64, expectedChunk
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -65,7 +64,6 @@ func (c *Client) UploadChunk(sessionID string, chunkIndex int, body io.Reader) e
 	if err != nil {
 		return err
 	}
-	c.setAuth(req)
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	resp, err := c.httpClient.Do(req)
@@ -90,7 +88,6 @@ func (c *Client) CompleteUpload(sessionID string) (*types.UploadResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -119,7 +116,6 @@ func (c *Client) CancelUpload(sessionID string) error {
 	if err != nil {
 		return err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

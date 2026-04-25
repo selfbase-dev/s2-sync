@@ -29,7 +29,6 @@ func (c *Client) CreateToken(name, basePath string, canDelegate bool, accessPath
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(httpReq)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(httpReq)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -117,7 +118,7 @@ func TestMe_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_testtoken")
+	c := New(srv.URL, auth.NewStaticSource("s2_testtoken"))
 	me, err := c.Me()
 	if err != nil {
 		t.Fatalf("Me() error: %v", err)
@@ -140,7 +141,7 @@ func TestMe_Unauthorized(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_bad")
+	c := New(srv.URL, auth.NewStaticSource("s2_bad"))
 	_, err := c.Me()
 	if err != ErrUnauthorized {
 		t.Errorf("Me() error = %v, want ErrUnauthorized", err)
@@ -162,7 +163,7 @@ func TestListDir_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	resp, err := c.ListDir("prefix/")
 	if err != nil {
 		t.Fatalf("ListDir() error: %v", err)
@@ -187,7 +188,7 @@ func TestListDir_AddsTrailingSlash(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.ListDir("docs") // no trailing slash
 	if err != nil {
 		t.Fatalf("ListDir() error: %v", err)
@@ -204,7 +205,7 @@ func TestListAllRecursive_404_ReturnsEmpty(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	result, err := c.ListAllRecursive("nonexistent/prefix/")
 	if err != nil {
 		t.Fatalf("ListAllRecursive() error: %v (want nil for 404)", err)
@@ -226,7 +227,7 @@ func TestDownload_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	dl, err := c.Download("test.txt")
 	if err != nil {
 		t.Fatalf("Download() error: %v", err)
@@ -252,7 +253,7 @@ func TestDownload_NotFound(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Download("missing.txt")
 	if err != ErrNotFound {
 		t.Errorf("Download() error = %v, want ErrNotFound", err)
@@ -273,7 +274,7 @@ func TestUpload_IfMatch_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	result, err := c.Upload("test.txt", strings.NewReader("hello"), "", 3)
 	if err != nil {
 		t.Fatalf("Upload() error: %v", err)
@@ -293,7 +294,7 @@ func TestUpload_SeqInResponse(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	result, err := c.Upload("test.txt", strings.NewReader("hello"), "", -1)
 	if err != nil {
 		t.Fatalf("Upload() error: %v", err)
@@ -315,7 +316,7 @@ func TestUpload_SeqAbsentInResponse(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	result, err := c.Upload("test.txt", strings.NewReader("hello"), "", -1)
 	if err != nil {
 		t.Fatalf("Upload() error: %v", err)
@@ -337,7 +338,7 @@ func TestUpload_IfNoneMatch_CreateOnly(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Upload("new.txt", strings.NewReader("hello"), "", 0) // 0 = If-None-Match: *
 	if err != nil {
 		t.Fatalf("Upload() error: %v", err)
@@ -357,7 +358,7 @@ func TestUpload_ForceOverwrite_NoConditionalHeaders(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Upload("f.txt", strings.NewReader("hello"), "", -1) // -1 = force
 	if err != nil {
 		t.Fatalf("Upload() error: %v", err)
@@ -368,7 +369,7 @@ func TestUpload_PreconditionFailed(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(412) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Upload("test.txt", strings.NewReader("x"), "", 3)
 	if err != ErrPreconditionFailed {
 		t.Errorf("error = %v, want ErrPreconditionFailed", err)
@@ -379,7 +380,7 @@ func TestUpload_Conflict(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(409) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Upload("test.txt", strings.NewReader("x"), "", 0)
 	if err != ErrConflict {
 		t.Errorf("error = %v, want ErrConflict", err)
@@ -390,7 +391,7 @@ func TestUpload_StorageLimitExceeded(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"PUT /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(413) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Upload("test.txt", strings.NewReader("x"), "", -1)
 	if err != ErrStorageLimitExceeded {
 		t.Errorf("error = %v, want ErrStorageLimitExceeded", err)
@@ -403,7 +404,7 @@ func TestDelete_Success_204(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	result, err := c.Delete("test.txt")
 	if err != nil {
 		t.Fatalf("Delete() error: %v", err)
@@ -419,7 +420,7 @@ func TestDelete_Success_WithSeq(t *testing.T) {
 			jsonResponse(w, 200, map[string]any{"seq": 55})
 		},
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	result, err := c.Delete("test.txt")
 	if err != nil {
 		t.Fatalf("Delete() error: %v", err)
@@ -436,7 +437,7 @@ func TestDelete_NotFound(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"DELETE /api/files/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Delete("missing.txt")
 	if err != ErrNotFound {
 		t.Errorf("error = %v, want ErrNotFound", err)
@@ -453,7 +454,7 @@ func TestHeadFile_Success(t *testing.T) {
 			w.WriteHeader(200)
 		},
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	cv, sz, err := c.HeadFile("test.txt")
 	if err != nil {
 		t.Fatalf("HeadFile() error: %v", err)
@@ -488,7 +489,7 @@ func TestPollChanges_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	resp, err := c.PollChanges("cursor_abc")
 	if err != nil {
 		t.Fatalf("PollChanges() error: %v", err)
@@ -508,7 +509,7 @@ func TestPollChanges_CursorGone(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/changes": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(410) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.PollChanges("old_cursor")
 	if err != ErrCursorGone {
 		t.Errorf("error = %v, want ErrCursorGone", err)
@@ -526,7 +527,7 @@ func TestPollChanges_NoCursor(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.PollChanges("") // empty cursor
 	if err != nil {
 		t.Fatalf("PollChanges() error: %v", err)
@@ -545,7 +546,7 @@ func TestLatestCursor_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	cursor, err := c.LatestCursor()
 	if err != nil {
 		t.Fatalf("LatestCursor() error: %v", err)
@@ -563,7 +564,7 @@ func TestLatestCursor_Unauthorized(t *testing.T) {
 			w.WriteHeader(401)
 		},
 	})
-	c := New(srv.URL, "s2_bad")
+	c := New(srv.URL, auth.NewStaticSource("s2_bad"))
 	_, err := c.LatestCursor()
 	if err != ErrUnauthorized {
 		t.Errorf("LatestCursor() error = %v, want ErrUnauthorized", err)
@@ -576,7 +577,7 @@ func TestLatestCursor_Forbidden(t *testing.T) {
 			w.WriteHeader(403)
 		},
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.LatestCursor()
 	if err != ErrForbidden {
 		t.Errorf("LatestCursor() error = %v, want ErrForbidden", err)
@@ -615,7 +616,7 @@ func TestChunkedUpload_FullFlow(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 
 	session, err := c.CreateUploadSession("big.bin", 1000, 1)
 	if err != nil {
@@ -655,7 +656,7 @@ func TestCompleteUpload_SeqInResponse(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	result, err := c.CompleteUpload("sess_1")
 	if err != nil {
 		t.Fatalf("CompleteUpload() error: %v", err)
@@ -695,7 +696,7 @@ func TestCreateToken_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_parent")
+	c := New(srv.URL, auth.NewStaticSource("s2_parent"))
 	resp, err := c.CreateToken("child", "/", false, []types.AccessPath{
 		{Path: "/", CanRead: true, CanWrite: true},
 	})
@@ -719,7 +720,7 @@ func TestCreateToken_Forbidden(t *testing.T) {
 			w.WriteHeader(403)
 		},
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.CreateToken("child", "/", false, nil)
 	if err != ErrForbidden {
 		t.Errorf("error = %v, want ErrForbidden", err)
@@ -740,7 +741,7 @@ func TestMove_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	result, err := c.Move("old/path.txt", "new/path.txt")
 	if err != nil {
 		t.Fatalf("Move() error: %v", err)
@@ -788,7 +789,7 @@ func TestSnapshot_ScopeRoot(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	resp, err := c.Snapshot("")
 	if err != nil {
 		t.Fatalf("Snapshot() error: %v", err)
@@ -819,7 +820,7 @@ func TestSnapshot_WithPath(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	if _, err := c.Snapshot("/vacation/2024"); err != nil {
 		t.Fatalf("Snapshot() error: %v", err)
 	}
@@ -832,7 +833,7 @@ func TestSnapshot_NotFound(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/snapshot": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Snapshot("/missing")
 	if err != ErrNotFound {
 		t.Errorf("error = %v, want ErrNotFound", err)
@@ -847,7 +848,7 @@ func TestSnapshot_SubtreeCapExceeded(t *testing.T) {
 			w.Write([]byte(`{"error":{"code":"subtree_cap_exceeded","message":"too big"}}`))
 		},
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Snapshot("/huge")
 	if err != ErrSubtreeCapExceeded {
 		t.Errorf("error = %v, want ErrSubtreeCapExceeded", err)
@@ -858,7 +859,7 @@ func TestSnapshot_Unauthorized(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/snapshot": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.Snapshot("")
 	if err != ErrUnauthorized {
 		t.Errorf("error = %v, want ErrUnauthorized", err)
@@ -882,7 +883,7 @@ func TestDownloadRevision_Success(t *testing.T) {
 		},
 	})
 
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	dl, err := c.DownloadRevision("rev_42")
 	if err != nil {
 		t.Fatalf("DownloadRevision() error: %v", err)
@@ -907,7 +908,7 @@ func TestDownloadRevision_NotFound(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"GET /api/revisions/": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) },
 	})
-	c := New(srv.URL, "s2_test")
+	c := New(srv.URL, auth.NewStaticSource("s2_test"))
 	_, err := c.DownloadRevision("rev_missing")
 	if err != ErrNotFound {
 		t.Errorf("error = %v, want ErrNotFound", err)

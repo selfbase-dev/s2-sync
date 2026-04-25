@@ -24,7 +24,6 @@ func (c *Client) ListDir(path string) (*types.ListResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -104,7 +103,6 @@ func (c *Client) Download(path string) (*DownloadResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -138,7 +136,6 @@ func (c *Client) HeadFile(path string) (contentVersion int64, size int64, err er
 	if err != nil {
 		return 0, 0, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -164,7 +161,6 @@ func (c *Client) Upload(path string, body io.Reader, contentType string, ifMatch
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -204,7 +200,6 @@ func (c *Client) Mkdir(path string) error {
 	if err != nil {
 		return err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -227,7 +222,6 @@ func (c *Client) Delete(path string) (*types.DeleteResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -278,7 +272,6 @@ func (c *Client) Move(srcPath, dstPath string) (*types.MoveResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setAuth(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)

@@ -8,52 +8,49 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/oauth"
 	"github.com/selfbase-dev/s2-sync/internal/service"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // --- Auth ---
 
-// HasToken reports whether a token is stored in the system keyring.
-func (a *App) HasToken() bool {
-	t, err := auth.GetKeyring()
-	return err == nil && t != ""
+// HasValidSession reports whether a structured OAuth session is stored
+// in the system keyring. It does not contact the server — the dashboard
+// will surface a real auth failure on the next API call.
+func (a *App) HasValidSession() bool {
+	return auth.HasValidSession()
 }
 
-// ValidateToken checks format and calls /api/me without persisting.
-// Used by the onboarding Step 1 so that a validated-but-not-committed
-// token does not create persistent app state; only SaveToken commits
-// to the keyring once the user completes Step 2. Keeps the keyring
-// aligned with "onboarding complete" (which HasToken() reports on).
-func (a *App) ValidateToken(token string) error {
-	token = strings.TrimSpace(token)
-	if !strings.HasPrefix(token, "s2_") {
-		return fmt.Errorf("invalid token: must start with s2_")
+// StartOAuthLogin runs the full Authorization Code + PKCE + loopback
+// flow: opens the system browser, waits for the redirect on a private
+// loopback port, exchanges the code at /oauth/token, and persists the
+// resulting session. Blocks until the user completes consent (or
+// cancels in the browser, or the 5-minute default timeout fires).
+func (a *App) StartOAuthLogin() error {
+	tr, err := oauth.Login(a.ctx, a.endpoint)
+	if err != nil {
+		return err
 	}
-	c := client.New(a.endpoint, token)
-	if _, err := c.Me(); err != nil {
-		return fmt.Errorf("token validation failed: %w", err)
+	if err := auth.SaveSession(a.endpoint, tr); err != nil {
+		return fmt.Errorf("save session: %w", err)
+	}
+	// Sanity-check the new credentials before reporting success.
+	source, err := auth.NewSource(a.endpoint)
+	if err != nil {
+		return err
+	}
+	if _, err := client.New(a.endpoint, source).Me(); err != nil {
+		return fmt.Errorf("verify: %w", err)
 	}
 	return nil
 }
 
-// SaveToken persists a token to the system keyring. Callers are
-// expected to have validated it via ValidateToken first; this method
-// still runs the same format + /api/me check defensively so older
-// paths (CLI login, future callers) stay safe.
-func (a *App) SaveToken(token string) error {
-	if err := a.ValidateToken(token); err != nil {
-		return err
-	}
-	return auth.SetKeyring(strings.TrimSpace(token))
-}
-
-// ClearToken stops any running sync and removes the stored token.
-func (a *App) ClearToken() error {
+// SignOut stops any running sync and removes the stored session.
+func (a *App) SignOut() error {
 	if err := a.svc.Stop(); err != nil {
 		return err
 	}
@@ -171,14 +168,14 @@ func (a *App) Endpoint() string {
 func (a *App) ConfirmDisconnect() (bool, error) {
 	res, err := wailsruntime.MessageDialog(a.ctx, wailsruntime.MessageDialogOptions{
 		Type:          wailsruntime.QuestionDialog,
-		Title:         "Disconnect from S2?",
-		Message:       "Stop syncing and remove the saved token from this device. Your files are not deleted.",
-		Buttons:       []string{"Disconnect", "Cancel"},
+		Title:         "Sign out of S2?",
+		Message:       "Stop syncing and remove the saved session from this device. Your files are not deleted.",
+		Buttons:       []string{"Sign out", "Cancel"},
 		DefaultButton: "Cancel",
 		CancelButton:  "Cancel",
 	})
 	if err != nil {
 		return false, err
 	}
-	return res == "Disconnect", nil
+	return res == "Sign out", nil
 }

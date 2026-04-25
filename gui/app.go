@@ -54,7 +54,7 @@ func (a *App) forwardEvents() {
 // saved folder are present. Keeps the "open the app and it just works"
 // expectation; users explicitly Stop if they want to pause.
 func (a *App) maybeAutoResume() {
-	if !a.HasToken() {
+	if !a.HasValidSession() {
 		return
 	}
 	folder := a.SavedFolder()
