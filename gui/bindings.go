@@ -12,6 +12,7 @@ import (
 
 	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	"github.com/selfbase-dev/s2-sync/internal/installation"
 	"github.com/selfbase-dev/s2-sync/internal/oauth"
 	"github.com/selfbase-dev/s2-sync/internal/service"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -50,7 +51,14 @@ func (a *App) StartOAuthLogin() error {
 		cancel()
 	}()
 
-	tr, err := oauth.Login(ctx, a.endpoint)
+	inst, err := installation.LoadOrCreate()
+	if err != nil {
+		return fmt.Errorf("load installation: %w", err)
+	}
+	tr, err := oauth.Login(ctx, a.endpoint, oauth.LoginOpts{
+		InstallationID: inst.InstallationID,
+		DeviceLabel:    inst.DeviceLabel,
+	})
 	if err != nil {
 		return err
 	}

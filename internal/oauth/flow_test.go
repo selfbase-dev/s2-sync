@@ -15,7 +15,13 @@ import (
 // is the kind of silent break that only shows up on the server side
 // — keep this strict.
 func TestBuildAuthorizeURL(t *testing.T) {
-	got := buildAuthorizeURL("https://scopeds.dev", "http://127.0.0.1:54321/callback", "STATE", "CC")
+	got := buildAuthorizeURL(
+		"https://scopeds.dev",
+		"http://127.0.0.1:54321/callback",
+		"STATE",
+		"CC",
+		LoginOpts{InstallationID: "inst-1", DeviceLabel: "MacBook"},
+	)
 	u, err := url.Parse(got)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -32,10 +38,30 @@ func TestBuildAuthorizeURL(t *testing.T) {
 		"state":                 "STATE",
 		"code_challenge":        "CC",
 		"code_challenge_method": "S256",
+		"installation_id":       "inst-1",
+		"device_label":          "MacBook",
 	} {
 		if got := q.Get(k); got != want {
 			t.Errorf("%s: got %q want %q", k, got, want)
 		}
+	}
+}
+
+func TestBuildAuthorizeURL_NoInstallation(t *testing.T) {
+	got := buildAuthorizeURL(
+		"https://scopeds.dev",
+		"http://127.0.0.1:54321/callback",
+		"STATE",
+		"CC",
+		LoginOpts{},
+	)
+	u, _ := url.Parse(got)
+	q := u.Query()
+	if q.Has("installation_id") {
+		t.Errorf("unexpected installation_id when empty")
+	}
+	if q.Has("device_label") {
+		t.Errorf("unexpected device_label when empty")
 	}
 }
 

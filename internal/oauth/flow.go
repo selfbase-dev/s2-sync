@@ -33,13 +33,23 @@ type TokenResponse struct {
 	Scope        string `json:"scope,omitempty"`
 }
 
+// LoginOpts configures Login. ADR 0056: installation_id is the multi-device
+// distinguisher. s2-sync hardcodes a single client_id across machines, so
+// without a per-install id the server collapses them into one grant and the
+// last login revokes the others. installation_id is generated/persisted by
+// internal/installation. device_label is display only (hostname default).
+type LoginOpts struct {
+	InstallationID string
+	DeviceLabel    string
+}
+
 // Login runs the full Authorization Code + PKCE flow against `endpoint`
 // (e.g. "https://scopeds.dev"). Returns the issued tokens.
 //
 // Caller responsibilities: persist the result (auth.SaveSession) and
 // inform the user. This function blocks until the user completes consent
 // in the browser, cancels, or the context expires.
-func Login(ctx context.Context, endpoint string) (*TokenResponse, error) {
+func Login(ctx context.Context, endpoint string, opts LoginOpts) (*TokenResponse, error) {
 	endpoint = strings.TrimRight(endpoint, "/")
 	if ctx == nil {
 		ctx = context.Background()
@@ -66,7 +76,7 @@ func Login(ctx context.Context, endpoint string) (*TokenResponse, error) {
 	defer lb.shutdown()
 
 	redirectURI := lb.redirectURI()
-	authURL := buildAuthorizeURL(endpoint, redirectURI, state, pkce.challenge)
+	authURL := buildAuthorizeURL(endpoint, redirectURI, state, pkce.challenge, opts)
 
 	if err := openBrowser(authURL); err != nil {
 		return nil, fmt.Errorf("open browser: %w (open this URL manually: %s)", err, authURL)
@@ -80,7 +90,7 @@ func Login(ctx context.Context, endpoint string) (*TokenResponse, error) {
 	return exchangeCode(ctx, endpoint, code, redirectURI, pkce.verifier)
 }
 
-func buildAuthorizeURL(endpoint, redirectURI, state, codeChallenge string) string {
+func buildAuthorizeURL(endpoint, redirectURI, state, codeChallenge string, opts LoginOpts) string {
 	q := url.Values{}
 	q.Set("response_type", "code")
 	q.Set("client_id", ClientID)
@@ -89,6 +99,12 @@ func buildAuthorizeURL(endpoint, redirectURI, state, codeChallenge string) strin
 	q.Set("state", state)
 	q.Set("code_challenge", codeChallenge)
 	q.Set("code_challenge_method", "S256")
+	if opts.InstallationID != "" {
+		q.Set("installation_id", opts.InstallationID)
+	}
+	if opts.DeviceLabel != "" {
+		q.Set("device_label", opts.DeviceLabel)
+	}
 	return endpoint + "/oauth/authorize?" + q.Encode()
 }
 
