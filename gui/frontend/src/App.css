@@ -191,10 +191,25 @@
   line-height: 1.6;
   max-height: 240px;
   min-height: 120px;
-  overflow-y: auto;
+  overflow-y: scroll;
   padding: 8px 0;
 }
 .logs.empty { color: #475569; font-style: italic; padding: 12px; }
+/* Always-visible dark scrollbar — macOS hides the auto bar in WebKit
+   unless actively scrolling, which makes it look like the panel can't
+   be scrolled at all. */
+.logs::-webkit-scrollbar {
+  width: 10px;
+  background: #0b1220;
+}
+.logs::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 5px;
+  border: 2px solid #0b1220;
+}
+.logs::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
 
 .log-row {
   display: grid;
