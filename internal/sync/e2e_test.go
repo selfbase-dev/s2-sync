@@ -229,7 +229,7 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 	state.ClearFiles()
 
 	exclude := LoadExclude(e.localDir)
-	walkRes, err := Walk(e.localDir, state.Files, exclude)
+	walkRes, err := Walk(e.localDir, exclude)
 	if err != nil {
 		e.t.Fatalf("Walk: %v", err)
 	}
@@ -265,7 +265,7 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	e.t.Helper()
 	exclude := LoadExclude(e.localDir)
-	walkRes, err := Walk(e.localDir, state.Files, exclude)
+	walkRes, err := Walk(e.localDir, exclude)
 	if err != nil {
 		e.t.Fatalf("Walk: %v", err)
 	}
@@ -316,7 +316,7 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 		dirOutcome.SubtreeSnapshots[i].Remote = filtered
 	}
 	if dirOutcome.LocalChanged || len(dirOutcome.SubtreeSnapshots) > 0 {
-		walkRes, err = Walk(e.localDir, state.Files, exclude)
+		walkRes, err = Walk(e.localDir, exclude)
 		if err != nil {
 			e.t.Fatalf("Walk (post dir events): %v", err)
 		}
@@ -754,7 +754,7 @@ func TestS32_PullDuringLocalEdit(t *testing.T) {
 	}
 	defer state.Close()
 	exclude := LoadExclude(env.localDir)
-	walkRes, err := Walk(env.localDir, state.Files, exclude)
+	walkRes, err := Walk(env.localDir, exclude)
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}

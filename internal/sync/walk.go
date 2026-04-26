@@ -34,11 +34,10 @@ type WalkResult struct {
 
 // Walk recursively scans the local directory. Paths are NFC-normalized
 // (deterministic tie-break: idempotent convergence across macOS NFD and
-// other-OS NFC). If archive is provided, files whose modtime and size
-// match are reused without rehashing (like rsync).
+// other-OS NFC).
 //
 // Skips .s2/ and paths matching exclude.
-func Walk(root string, archive map[string]types.FileState, exclude func(string) bool) (WalkResult, error) {
+func Walk(root string, exclude func(string) bool) (WalkResult, error) {
 	// buckets: FoldKey → canonical path → LocalFile.
 	// A bucket with >1 entries indicates a case/unicode collision.
 	type entry struct {

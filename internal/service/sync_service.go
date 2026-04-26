@@ -12,13 +12,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"strings"
 	stdsync "sync"
 	"time"
 
-	"github.com/selfbase-dev/s2-sync/internal/auth"
-	"github.com/selfbase-dev/s2-sync/internal/client"
 	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	s2sync "github.com/selfbase-dev/s2-sync/internal/sync"
 )
@@ -137,40 +133,10 @@ func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 		return err
 	}
 
-	info, err := os.Stat(mount.Path)
-	if err != nil {
-		return fail(fmt.Errorf("local directory not found: %w", err))
-	}
-	if !info.IsDir() {
-		return fail(fmt.Errorf("%s is not a directory", mount.Path))
-	}
-
-	if err := s2sync.EnsureIgnoreFile(mount.Path); err != nil {
-		return fail(fmt.Errorf("create .s2ignore: %w", err))
-	}
-
-	source, err := auth.NewSource(s.endpoint)
+	c, remotePrefix, state, err := s2sync.Open(mount.Path, s.endpoint)
 	if err != nil {
 		return fail(err)
 	}
-
-	c := client.New(s.endpoint, source)
-	me, err := c.Me()
-	if err != nil {
-		return fail(fmt.Errorf("auth: %w", err))
-	}
-
-	identity := s2sync.Identity{
-		Endpoint: s.endpoint,
-		UserID:   me.UserID,
-		BasePath: me.BasePath,
-	}
-	state, err := s2sync.LoadState(mount.Path, identity)
-	if err != nil {
-		return fail(fmt.Errorf("load state: %w", err))
-	}
-
-	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
 
 	s.logger.Info(slog2.ServiceStart, "mount", mount.Path)
 

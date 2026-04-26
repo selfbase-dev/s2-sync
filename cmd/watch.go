@@ -5,14 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
 	s2sync "github.com/selfbase-dev/s2-sync/internal/sync"
 	"github.com/spf13/cobra"
@@ -39,283 +34,71 @@ func init() {
 	rootCmd.AddCommand(watchCmd)
 }
 
-// --- Testable extracted functions ---
-
-// shouldProcessEvent returns true if the event path should trigger a sync.
-func shouldProcessEvent(rel string, exclude func(string) bool) bool {
-	if rel == ".s2" || strings.HasPrefix(rel, ".s2/") {
-		return false
-	}
-	if exclude != nil && exclude(rel) {
-		return false
-	}
-	return true
-}
-
-// WatchLoopConfig holds injectable dependencies for the watch loop.
-type WatchLoopConfig struct {
-	SyncFn       func() error
-	PollFn       func() (hasChanges, needResync bool, err error)
-	LocalEvents  <-chan struct{}
-	PollInterval time.Duration
-	Debounce     time.Duration
-	Ctx          context.Context
-}
-
-// watchLoop is the testable core of the watch command.
-func watchLoop(cfg WatchLoopConfig) {
-	ticker := time.NewTicker(cfg.PollInterval)
-	defer ticker.Stop()
-
-	var debounceTimer *time.Timer
-
-	for {
-		select {
-		case <-cfg.Ctx.Done():
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			return
-
-		case <-cfg.LocalEvents:
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			debounceTimer = time.AfterFunc(cfg.Debounce, func() {
-				_ = cfg.SyncFn()
-			})
-
-		case <-ticker.C:
-			hasChanges, needResync, err := cfg.PollFn()
-			if err != nil {
-				continue
-			}
-			if hasChanges || needResync {
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
-				_ = cfg.SyncFn()
-			}
-		}
-	}
-}
-
-// filterFsEventsWithAutoWatch reads fsnotify events, filters them, signals
-// localChanged, and auto-watches newly created directories.
-func filterFsEventsWithAutoWatch(watcher *fsnotify.Watcher, localDir string, exclude func(string) bool, localChanged chan<- struct{}) {
-	for {
-		select {
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-			rel, err := filepath.Rel(localDir, event.Name)
-			if err != nil {
-				continue
-			}
-			rel = filepath.ToSlash(rel)
-			if !shouldProcessEvent(rel, exclude) {
-				continue
-			}
-
-			// Auto-watch new directories
-			if event.Has(fsnotify.Create) {
-				if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-					_ = addWatchDirs(watcher, event.Name, exclude)
-				}
-			}
-
-			select {
-			case localChanged <- struct{}{}:
-			default:
-			}
-		case _, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-		}
-	}
-}
-
-// --- Command implementation ---
-
 func runWatch(cmd *cobra.Command, args []string) error {
 	localDir := args[0]
 
-	info, err := os.Stat(localDir)
-	if err != nil {
-		return fmt.Errorf("local directory not found: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", localDir)
-	}
-
-	if err := s2sync.EnsureIgnoreFile(localDir); err != nil {
-		return fmt.Errorf("failed to create .s2ignore: %w", err)
-	}
-
-	endpoint := viper.GetString("endpoint")
-	source, err := auth.NewSource(endpoint)
+	c, remotePrefix, state, err := s2sync.Open(localDir, viper.GetString("endpoint"))
 	if err != nil {
 		return err
-	}
-	c := client.New(endpoint, source)
-
-	me, err := c.Me()
-	if err != nil {
-		return fmt.Errorf("failed to get auth context: %w", err)
-	}
-	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
-
-	identity := s2sync.Identity{
-		Endpoint: endpoint,
-		UserID:   me.UserID,
-		BasePath: me.BasePath,
-	}
-	state, err := s2sync.LoadState(localDir, identity)
-	if err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
-	}
-
-	var syncMu sync.Mutex
-	// Shutdown dance lives at the bottom of runWatch: cancel the
-	// context → wait for watchLoop → drain in-flight sync via syncMu →
-	// then Close state. Do NOT `defer state.Close()` here: closing
-	// while a late AfterFunc callback is still inside doSync would
-	// race the shared *sql.DB handle.
-
-	// Initial full sync
-	Logger().Info("sync.start", "phase", "initial")
-	if err := doSync(cmd, localDir, remotePrefix, c, state, &syncMu); err != nil {
-		state.Close()
-		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// SIGINT/SIGTERM → ctx cancel, so the watch loop's shutdown discipline
+	// (drain syncMu, close state) runs uniformly with the GUI service.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		state.Close()
-		return fmt.Errorf("failed to create file watcher: %w", err)
-	}
-	defer watcher.Close()
+	go func() {
+		<-sigCh
+		Logger().Info("service.stop", "phase", "requested")
+		cancel()
+	}()
 
 	exclude := s2sync.LoadExclude(localDir)
-	if err := addWatchDirs(watcher, localDir, exclude); err != nil {
-		state.Close()
-		return fmt.Errorf("failed to watch directory: %w", err)
+	opts := s2sync.WatchOptions{
+		LocalDir:     localDir,
+		Exclude:      exclude,
+		PollInterval: watchPollInterval,
 	}
 
-	localChanged := make(chan struct{}, 1)
-	go filterFsEventsWithAutoWatch(watcher, localDir, exclude, localChanged)
+	syncOpts := s2sync.SyncOptions{Logger: Logger()}
+	cb := s2sync.WatchCallbacks{
+		SyncFn: func() error {
+			if state.Cursor == "" {
+				return s2sync.RunInitialSync(c, localDir, remotePrefix, state, syncOpts)
+			}
+			return s2sync.RunIncrementalSync(c, localDir, remotePrefix, state, syncOpts)
+		},
+		PollFn: func() (bool, bool, error) {
+			cursor := state.Cursor
+			if cursor == "" {
+				return false, true, nil
+			}
+			resp, err := c.PollChanges(cursor)
+			if err == client.ErrCursorGone {
+				return false, true, nil
+			}
+			if err != nil {
+				return false, false, err
+			}
+			for _, ch := range resp.Changes {
+				if !state.IsPushedSeq(ch.Seq) {
+					return true, false, nil
+				}
+			}
+			return len(resp.Changes) > 0, false, nil
+		},
+	}
 
+	Logger().Info("sync.start", "phase", "initial")
 	Logger().Info("watch.start",
 		"local", localDir,
 		"remote", remotePrefix,
 		"poll_interval", watchPollInterval.String(),
 	)
-
-	pollFn := func() (bool, bool, error) {
-		syncMu.Lock()
-		cursor := state.Cursor
-		syncMu.Unlock()
-		if cursor == "" {
-			return false, true, nil
-		}
-		resp, err := c.PollChanges(cursor)
-		if err == client.ErrCursorGone {
-			return false, true, nil
-		}
-		if err != nil {
-			return false, false, err
-		}
-		hasRemoteChanges := false
-		for _, ch := range resp.Changes {
-			if state.IsPushedSeq(ch.Seq) {
-				continue
-			}
-			hasRemoteChanges = true
-			break
-		}
-		hasCursorWork := len(resp.Changes) > 0
-		return hasRemoteChanges || hasCursorWork, false, nil
+	if err := s2sync.RunWatchLoop(ctx, opts, state, cb); err != nil {
+		return fmt.Errorf("watch: %w", err)
 	}
-
-	syncFn := func() error {
-		// Shutdown guard: AfterFunc callbacks scheduled before cancel()
-		// may still fire after watchLoop returns. Skip them so we don't
-		// race the deferred state.Close().
-		if ctx.Err() != nil {
-			return nil
-		}
-		return doSync(cmd, localDir, remotePrefix, c, state, &syncMu)
-	}
-
-	loopDone := make(chan struct{})
-	go func() {
-		defer close(loopDone)
-		watchLoop(WatchLoopConfig{
-			SyncFn:       syncFn,
-			PollFn:       pollFn,
-			LocalEvents:  localChanged,
-			PollInterval: watchPollInterval,
-			Debounce:     2 * time.Second,
-			Ctx:          ctx,
-		})
-	}()
-
-	<-sigCh
-	Logger().Info("service.stop", "phase", "requested")
-	cancel()
-	<-loopDone
-	// Drain any sync that slipped past the ctx check — Lock blocks
-	// until it returns. Holding the lock across Close also fences any
-	// late doSync caller (they will wake up after Close and see
-	// `Save after Close`, which is a no-op return).
-	syncMu.Lock()
-	closeErr := state.Close()
-	syncMu.Unlock()
-	return closeErr
-}
-
-func doSync(_ *cobra.Command, localDir, remotePrefix string, c *client.Client, state *s2sync.State, mu *sync.Mutex) error {
-	mu.Lock()
-	defer mu.Unlock()
-
-	opts := s2sync.SyncOptions{Logger: Logger()}
-
-	if state.Cursor == "" {
-		return s2sync.RunInitialSync(c, localDir, remotePrefix, state, opts)
-	}
-	return s2sync.RunIncrementalSync(c, localDir, remotePrefix, state, opts)
-}
-
-func addWatchDirs(watcher *fsnotify.Watcher, root string, exclude func(string) bool) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !info.IsDir() {
-			return nil
-		}
-
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-
-		if rel == ".s2" || strings.HasPrefix(rel, ".s2/") {
-			return filepath.SkipDir
-		}
-		if rel != "." && exclude != nil && exclude(rel) {
-			return filepath.SkipDir
-		}
-
-		return watcher.Add(path)
-	})
+	return nil
 }

@@ -1,12 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-	"os"
-	"strings"
-
-	"github.com/selfbase-dev/s2-sync/internal/auth"
-	"github.com/selfbase-dev/s2-sync/internal/client"
 	s2sync "github.com/selfbase-dev/s2-sync/internal/sync"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -39,39 +33,9 @@ func init() {
 func runSync(cmd *cobra.Command, args []string) error {
 	localDir := args[0]
 
-	info, err := os.Stat(localDir)
-	if err != nil {
-		return fmt.Errorf("local directory not found: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", localDir)
-	}
-
-	if err := s2sync.EnsureIgnoreFile(localDir); err != nil {
-		return fmt.Errorf("failed to create .s2ignore: %w", err)
-	}
-
-	endpoint := viper.GetString("endpoint")
-	source, err := auth.NewSource(endpoint)
+	c, remotePrefix, state, err := s2sync.Open(localDir, viper.GetString("endpoint"))
 	if err != nil {
 		return err
-	}
-	c := client.New(endpoint, source)
-
-	me, err := c.Me()
-	if err != nil {
-		return fmt.Errorf("failed to get auth context: %w", err)
-	}
-	remotePrefix := strings.TrimPrefix(me.BasePath, "/")
-
-	identity := s2sync.Identity{
-		Endpoint: endpoint,
-		UserID:   me.UserID,
-		BasePath: me.BasePath,
-	}
-	state, err := s2sync.LoadState(localDir, identity)
-	if err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
 	}
 	defer state.Close()
 

@@ -55,11 +55,18 @@ func expandArchiveMove(
 			return nil, mutated, fmt.Errorf("hash %s: %w", m.oldKey, hashErr)
 		}
 		if hashErr == nil && localHash != fs.LocalHash {
+			// Drift detected: defer archive mutation until executePreserveLocalRename
+			// succeeds. If we delete the archive entry here and the executor's
+			// os.Rename later fails, the local file at oldKey would resurface
+			// next sync as a brand-new file and get re-pushed under the old
+			// path — silent data drift. Keeping the archive entry means a
+			// failed rename leaves us in a recoverable state (the next cycle
+			// retries the preserve, or eventually delete-local lets the
+			// server's new-path copy flow back via change log).
 			plans = append(plans, types.SyncPlan{
 				Path:   m.oldKey,
 				Action: types.PreserveLocalRename,
 			})
-			state.DeleteFile(m.oldKey)
 			continue
 		}
 

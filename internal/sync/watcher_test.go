@@ -1,51 +1,22 @@
-package cmd
+package sync
 
 import (
 	"context"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestShouldProcessEvent(t *testing.T) {
-	exclude := func(path string) bool {
-		return path == ".DS_Store" || strings.HasPrefix(path, "node_modules")
-	}
-
-	tests := []struct {
-		rel  string
-		want bool
-	}{
-		{"readme.md", true},
-		{"docs/notes.txt", true},
-		{".s2", false},
-		{".s2/state.json", false},
-		{".DS_Store", false},
-		{"node_modules/pkg", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.rel, func(t *testing.T) {
-			got := shouldProcessEvent(tt.rel, exclude)
-			if got != tt.want {
-				t.Errorf("shouldProcessEvent(%q) = %v, want %v", tt.rel, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestWatchLoop_LocalEventDebounce(t *testing.T) {
+func TestWatchLoopCore_LocalEventDebounce(t *testing.T) {
 	var syncCount atomic.Int32
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	localEvents := make(chan struct{}, 10)
 
-	go watchLoop(WatchLoopConfig{
-		SyncFn: func() error {
+	go watchLoopCore(ctx, watchLoopCoreCfg{
+		SyncFn: func() {
 			syncCount.Add(1)
-			return nil
 		},
 		PollFn: func() (bool, bool, error) {
 			return false, false, nil
@@ -53,7 +24,6 @@ func TestWatchLoop_LocalEventDebounce(t *testing.T) {
 		LocalEvents:  localEvents,
 		PollInterval: 1 * time.Hour,
 		Debounce:     50 * time.Millisecond,
-		Ctx:          ctx,
 	})
 
 	// Send 5 rapid events — should coalesce to 1 sync
@@ -70,7 +40,7 @@ func TestWatchLoop_LocalEventDebounce(t *testing.T) {
 	}
 }
 
-func TestWatchLoop_PollBehavior(t *testing.T) {
+func TestWatchLoopCore_PollBehavior(t *testing.T) {
 	tests := []struct {
 		name       string
 		hasChanges bool
@@ -80,9 +50,9 @@ func TestWatchLoop_PollBehavior(t *testing.T) {
 		{"remote changes trigger sync", true, false, true},
 		{"cursor invalid triggers sync", false, true, true},
 		{"no changes no sync", false, false, false},
-		// Bug fix: self-only batches return hasChanges=true so cursor advances.
-		// watchLoop must call syncFn; runIncrementalSyncInner filters self-changes
-		// and advances cursor even when no real remote work is done.
+		// Self-only batches return hasChanges=true so cursor advances.
+		// runIncrementalSync filters self-changes and advances cursor even
+		// when no real remote work is done.
 		{"self-only batch triggers sync for cursor advancement", true, false, true},
 	}
 
@@ -92,11 +62,10 @@ func TestWatchLoop_PollBehavior(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
 
-			go watchLoop(WatchLoopConfig{
-				SyncFn: func() error {
+			go watchLoopCore(ctx, watchLoopCoreCfg{
+				SyncFn: func() {
 					syncCount.Add(1)
 					cancel()
-					return nil
 				},
 				PollFn: func() (bool, bool, error) {
 					return tt.hasChanges, tt.needResync, nil
@@ -104,7 +73,6 @@ func TestWatchLoop_PollBehavior(t *testing.T) {
 				LocalEvents:  make(chan struct{}),
 				PollInterval: 50 * time.Millisecond,
 				Debounce:     10 * time.Millisecond,
-				Ctx:          ctx,
 			})
 
 			<-ctx.Done()
@@ -118,18 +86,17 @@ func TestWatchLoop_PollBehavior(t *testing.T) {
 	}
 }
 
-func TestWatchLoop_ContextCancel(t *testing.T) {
+func TestWatchLoopCore_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 
 	go func() {
-		watchLoop(WatchLoopConfig{
-			SyncFn:       func() error { return nil },
+		watchLoopCore(ctx, watchLoopCoreCfg{
+			SyncFn:       func() {},
 			PollFn:       func() (bool, bool, error) { return false, false, nil },
 			LocalEvents:  make(chan struct{}),
 			PollInterval: 1 * time.Hour,
 			Debounce:     1 * time.Second,
-			Ctx:          ctx,
 		})
 		close(done)
 	}()
@@ -139,6 +106,6 @@ func TestWatchLoop_ContextCancel(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(1 * time.Second):
-		t.Error("watchLoop did not exit after context cancel")
+		t.Error("watchLoopCore did not exit after context cancel")
 	}
 }

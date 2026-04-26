@@ -37,7 +37,7 @@ func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *Stat
 	caseInsensitive := IsCaseInsensitiveFS(localDir)
 
 	exclude := LoadExclude(localDir)
-	walkResult, err := Walk(localDir, state.Files, exclude)
+	walkResult, err := Walk(localDir, exclude)
 	if err != nil {
 		return fmt.Errorf("local scan failed: %w", err)
 	}
@@ -85,7 +85,7 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 	caseInsensitive := IsCaseInsensitiveFS(localDir)
 
 	exclude := LoadExclude(localDir)
-	walkResult, err := Walk(localDir, state.Files, exclude)
+	walkResult, err := Walk(localDir, exclude)
 	if err != nil {
 		return fmt.Errorf("local scan failed: %w", err)
 	}
@@ -129,7 +129,7 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 		allRemoteCollisions = append(allRemoteCollisions, coll...)
 	}
 	if dirOutcome.LocalChanged || len(dirOutcome.SubtreeSnapshots) > 0 {
-		walkResult, err = Walk(localDir, state.Files, exclude)
+		walkResult, err = Walk(localDir, exclude)
 		if err != nil {
 			return fmt.Errorf("local re-scan failed: %w", err)
 		}

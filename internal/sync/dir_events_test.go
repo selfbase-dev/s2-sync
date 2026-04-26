@@ -209,8 +209,11 @@ func TestExpandArchiveMove_LocalEditedBecomesPreserveRename(t *testing.T) {
 	if !exists(t, dir, "old/a.txt") {
 		t.Error("old/a.txt should still exist on conflict preserve")
 	}
-	if _, ok := archive["old/a.txt"]; ok {
-		t.Error("archive entry should be removed on conflict preserve")
+	// Archive entry must NOT be removed here — see comment in
+	// expandArchiveMove. Removal happens in executePreserveLocalRename
+	// after os.Rename succeeds, so a rename failure can't strand us.
+	if _, ok := archive["old/a.txt"]; !ok {
+		t.Error("archive entry must be retained until executor renames; got removed")
 	}
 }
 

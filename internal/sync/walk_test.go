@@ -19,7 +19,7 @@ func TestWalk_BasicFiles(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
 	writeFile(t, filepath.Join(dir, "sub", "b.txt"), "world")
 
-	res, err := Walk(dir, nil, nil)
+	res, err := Walk(dir, nil)
 	if err != nil {
 		t.Fatalf("Walk() error: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestWalk_SkipsS2Dir(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "a.txt"), "hello")
 	writeFile(t, filepath.Join(dir, ".s2", "state.json"), "{}")
 
-	res, err := Walk(dir, nil, nil)
+	res, err := Walk(dir, nil)
 	if err != nil {
 		t.Fatalf("Walk() error: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestWalk_ExcludeFunction(t *testing.T) {
 	writeFile(t, filepath.Join(dir, ".git", "config"), "git")
 
 	exclude := DefaultExclude()
-	res, err := Walk(dir, nil, exclude)
+	res, err := Walk(dir, exclude)
 	if err != nil {
 		t.Fatalf("Walk() error: %v", err)
 	}
@@ -81,8 +81,8 @@ func TestWalk_HashConsistency(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a.txt"), "consistent content")
 
-	res1, _ := Walk(dir, nil, nil)
-	res2, _ := Walk(dir, nil, nil)
+	res1, _ := Walk(dir, nil)
+	res2, _ := Walk(dir, nil)
 
 	if res1.Files["a.txt"].Hash != res2.Files["a.txt"].Hash {
 		t.Error("hash should be consistent across walks")
@@ -91,7 +91,7 @@ func TestWalk_HashConsistency(t *testing.T) {
 
 func TestWalk_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
-	res, err := Walk(dir, nil, nil)
+	res, err := Walk(dir, nil)
 	if err != nil {
 		t.Fatalf("Walk() error: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestWalk_ForwardSlashPaths(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a", "b", "c.txt"), "deep")
 
-	res, _ := Walk(dir, nil, nil)
+	res, _ := Walk(dir, nil)
 	if _, ok := res.Files["a/b/c.txt"]; !ok {
 		t.Error("paths should use forward slashes")
 	}
@@ -118,7 +118,7 @@ func TestWalk_NFCNormalizes(t *testing.T) {
 	// it stays NFC. Either way, walk should return NFC-canonical.
 	writeFile(t, filepath.Join(dir, "à.txt"), "hello")
 
-	res, err := Walk(dir, nil, nil)
+	res, err := Walk(dir, nil)
 	if err != nil {
 		t.Fatalf("Walk() error: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestWalk_LocalCollision(t *testing.T) {
 		t.Skip("filesystem is case-insensitive (same inode); skipping")
 	}
 
-	res, err := Walk(dir, nil, nil)
+	res, err := Walk(dir, nil)
 	if err != nil {
 		t.Fatalf("Walk() error: %v", err)
 	}
