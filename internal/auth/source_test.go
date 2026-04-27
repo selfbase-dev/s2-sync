@@ -220,7 +220,7 @@ func TestRefresh_TimeoutPropagates(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := oauth.Refresh(ctx, srv.URL, "ref")
+	_, err := oauth.Refresh(ctx, srv.URL, "client-id", "ref")
 	if err == nil || !strings.Contains(err.Error(), "context") {
 		t.Fatalf("want context error, got %v", err)
 	}

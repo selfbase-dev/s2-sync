@@ -27,8 +27,8 @@ func swapKeyring(t *testing.T) *fakeKeyring {
 }
 
 // TestSaveAndLoadSession_RoundTrip is the basic lifecycle: persist a
-// fresh OAuth response, read it back. Bumps schema version and kind
-// implicitly so they're tested too.
+// fresh OAuth response, read it back. Bumps schema version, kind, and
+// client_id implicitly so they're tested too.
 func TestSaveAndLoadSession_RoundTrip(t *testing.T) {
 	fk := swapKeyring(t)
 	tr := &oauth.TokenResponse{
@@ -36,7 +36,7 @@ func TestSaveAndLoadSession_RoundTrip(t *testing.T) {
 		RefreshToken: "s2_r",
 		ExpiresIn:    3600,
 	}
-	if err := SaveSession("https://scopeds.dev", tr); err != nil {
+	if err := SaveSession("https://scopeds.dev", "client-abc", tr); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	if fk.data == "" {
@@ -49,6 +49,9 @@ func TestSaveAndLoadSession_RoundTrip(t *testing.T) {
 	}
 	if got.AccessToken != "s2_a" || got.RefreshToken != "s2_r" {
 		t.Errorf("tokens: %+v", got)
+	}
+	if got.ClientID != "client-abc" {
+		t.Errorf("client_id: %q", got.ClientID)
 	}
 	if got.Endpoint != "https://scopeds.dev" {
 		t.Errorf("endpoint: %s", got.Endpoint)
@@ -83,6 +86,7 @@ func TestLoadSession_VersionMismatchIsWiped(t *testing.T) {
 		Version:      999,
 		Kind:         "oauth",
 		Endpoint:     "https://scopeds.dev",
+		ClientID:     "client-abc",
 		AccessToken:  "s2_a",
 		RefreshToken: "s2_r",
 	})
@@ -93,6 +97,57 @@ func TestLoadSession_VersionMismatchIsWiped(t *testing.T) {
 	}
 	if fk.data != "" {
 		t.Fatalf("stale-version entry not wiped: %q", fk.data)
+	}
+}
+
+// TestLoadSession_LegacyV1IsWiped is the upgrade path from the
+// pre-DCR (hardcoded client_id, no per-install registration) format.
+// A v1 payload has no client_id field; LoadSession must wipe it so
+// the user is prompted to re-login cleanly with a freshly registered
+// client.
+func TestLoadSession_LegacyV1IsWiped(t *testing.T) {
+	fk := swapKeyring(t)
+	// Hand-crafted v1 shape — no client_id field. We don't reuse
+	// Session{} so we don't accidentally encode the new field as ""
+	// and slip past the version-mismatch wipe.
+	v1 := map[string]any{
+		"version":           1,
+		"kind":              "oauth",
+		"endpoint":          "https://scopeds.dev",
+		"access_token":      "s2_a",
+		"refresh_token":     "s2_r",
+		"access_expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+	}
+	b, _ := json.Marshal(v1)
+	fk.data = string(b)
+
+	if _, err := LoadSession(); err != ErrNoSession {
+		t.Fatalf("want ErrNoSession, got %v", err)
+	}
+	if fk.data != "" {
+		t.Fatalf("v1 entry not wiped: %q", fk.data)
+	}
+}
+
+// TestLoadSession_MissingClientIDIsWiped guards against a corrupted
+// v2 payload that for any reason carries no client_id. Refresh would
+// fail server-side, so it's safer to force a clean re-login.
+func TestLoadSession_MissingClientIDIsWiped(t *testing.T) {
+	fk := swapKeyring(t)
+	bad, _ := json.Marshal(&Session{
+		Version:      sessionSchemaVersion,
+		Kind:         "oauth",
+		Endpoint:     "https://scopeds.dev",
+		AccessToken:  "s2_a",
+		RefreshToken: "s2_r",
+	})
+	fk.data = string(bad)
+
+	if _, err := LoadSession(); err != ErrNoSession {
+		t.Fatalf("want ErrNoSession, got %v", err)
+	}
+	if fk.data != "" {
+		t.Fatalf("client_id-less entry not wiped: %q", fk.data)
 	}
 }
 

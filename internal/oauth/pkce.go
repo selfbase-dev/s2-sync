@@ -1,8 +1,10 @@
 // Package oauth implements the OAuth 2.1 + PKCE + loopback redirect
-// client flow that s2-sync uses to authenticate against the s2 server
-// (ADR 0056). The package is deliberately small: it knows how to start
-// a login (flow.go), receive the redirect (loopback.go), and produce
-// PKCE pairs (this file). Token storage and refresh live in auth/.
+// client flow that s2-sync uses to authenticate against the S2 server,
+// plus RFC 7591 Dynamic Client Registration. The package is deliberately
+// small: it knows how to register a client (flow.go: Register), start
+// a login (flow.go: Login), receive the redirect (loopback.go), and
+// produce PKCE pairs (this file). Token storage and refresh live in
+// auth/.
 package oauth
 
 import (

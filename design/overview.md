@@ -96,8 +96,7 @@ internal/
                     / bootstrap / state / case / exclude / safe_join / watcher)
   client/           S2 HTTP client (changes / files / snapshot / upload)
   auth/             OAuth session (keyring-persisted)
-  oauth/            OAuth flow (PKCE + loopback)
-  installation/     installation_id (per-install identity)
+  oauth/            OAuth flow (PKCE + loopback + RFC 7591 DCR)
   log/              slog wrapper + Wails sink
   types/            API and internal types
 ```

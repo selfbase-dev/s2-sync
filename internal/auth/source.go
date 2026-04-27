@@ -95,7 +95,7 @@ func (s *sessionSource) Refresh(ctx context.Context) (string, error) {
 }
 
 func (s *sessionSource) refreshLocked(ctx context.Context) (string, error) {
-	tr, err := oauth.Refresh(ctx, s.endpoint, s.sess.RefreshToken)
+	tr, err := oauth.Refresh(ctx, s.endpoint, s.sess.ClientID, s.sess.RefreshToken)
 	if err != nil {
 		// invalid_grant means the refresh token is permanently dead
 		// (revoked, expired, or reuse-detected). Wipe so the next

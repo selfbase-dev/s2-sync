@@ -5,7 +5,6 @@ import (
 
 	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
-	"github.com/selfbase-dev/s2-sync/internal/installation"
 	"github.com/selfbase-dev/s2-sync/internal/oauth"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -26,19 +25,19 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	endpoint := viper.GetString("endpoint")
 	fmt.Fprintf(cmd.OutOrStdout(), "Opening %s in your browser to sign in...\n", endpoint)
 
-	inst, err := installation.LoadOrCreate()
-	if err != nil {
-		return fmt.Errorf("load installation: %w", err)
+	// Reuse a previously-registered client_id when present; otherwise
+	// Login will perform Dynamic Client Registration to obtain one.
+	clientID := ""
+	if sess, err := auth.LoadSession(); err == nil {
+		clientID = sess.ClientID
 	}
-	tr, err := oauth.Login(cmd.Context(), endpoint, oauth.LoginOpts{
-		InstallationID: inst.InstallationID,
-		DeviceLabel:    inst.DeviceLabel,
-	})
+
+	res, err := oauth.Login(cmd.Context(), endpoint, clientID)
 	if err != nil {
 		return fmt.Errorf("sign-in failed: %w", err)
 	}
 
-	if err := auth.SaveSession(endpoint, tr); err != nil {
+	if err := auth.SaveSession(endpoint, res.ClientID, res.Tokens); err != nil {
 		return fmt.Errorf("save session: %w", err)
 	}
 
