@@ -89,6 +89,13 @@ jobs:
 
       - name: Codesign + notarize (macOS)
         if: matrix.name == 'darwin_arm64' && env.APPLE_TEAM_ID != ''
+        # First-ever submissions from a brand-new Apple Developer account
+        # can sit at "In Progress" for up to a week while Apple does an
+        # in-depth review (Apple DTS, 2026). Cap the wait so a stuck Notary
+        # queue doesn't burn macOS runner minutes — re-run the release
+        # after the first manual notarization completes and the system
+        # has "learned" the app.
+        timeout-minutes: 30
         working-directory: gui/build/bin
         shell: bash
         env:
