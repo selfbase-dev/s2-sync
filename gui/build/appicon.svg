@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <marker id="ah" markerWidth="3.5" markerHeight="3.5" refX="1.5" refY="1.75" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 3.5 1.75 L 0 3.5 z" fill="#425440"/>
+    </marker>
+  </defs>
+
+  <rect width="1024" height="1024" rx="180" ry="180" fill="#FDFBF8"/>
+
+  <g fill="none" stroke="#425440" stroke-width="64" stroke-linecap="butt">
+    <path d="M 164.3 418.8 A 360 360 0 0 1 859.7 418.8" marker-end="url(#ah)"/>
+    <path d="M 859.7 605.2 A 360 360 0 0 1 164.3 605.2" marker-end="url(#ah)"/>
+  </g>
+
+  <text x="512" y="690" font-family="Avenir Next, Helvetica, sans-serif" font-weight="900" font-size="500" text-anchor="middle" fill="#425440">2</text>
+</svg>
