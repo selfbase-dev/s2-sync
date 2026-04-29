@@ -15,12 +15,12 @@ Grab the [latest release](https://github.com/selfbase-dev/s2-sync/releases/lates
 
 | Platform | Asset |
 |---|---|
-| macOS (Apple Silicon) | `s2_darwin_arm64.tar.gz` |
-| macOS (Intel) | `s2_darwin_amd64.tar.gz` |
-| Linux x86_64 | `s2_linux_amd64.tar.gz` |
-| Linux arm64 | `s2_linux_arm64.tar.gz` |
-| Windows x86_64 | `s2_windows_amd64.zip` |
-| Windows arm64 | `s2_windows_arm64.zip` |
+| macOS (Apple Silicon) | `s2sync-cli_darwin_arm64.tar.gz` |
+| macOS (Intel) | `s2sync-cli_darwin_amd64.tar.gz` |
+| Linux x86_64 | `s2sync-cli_linux_amd64.tar.gz` |
+| Linux arm64 | `s2sync-cli_linux_arm64.tar.gz` |
+| Windows x86_64 | `s2sync-cli_windows_amd64.zip` |
+| Windows arm64 | `s2sync-cli_windows_arm64.zip` |
 
 Extract the archive and put `s2` on your `PATH`.
 

@@ -241,3 +241,16 @@ jobs:
             dist/checksums.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
+
+  release-notes:
+    name: Update release notes with downloads
+    needs: checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Downloads section and update release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: ./scripts/release-notes.sh --update
