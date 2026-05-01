@@ -1,7 +1,13 @@
 //go:build e2e
 
 // E2E tests for sync cycle against a real S2 server.
-// Run with: S2_ENDPOINT=http://localhost:8787 S2_TOKEN=s2_xxx go test -tags e2e ./internal/sync/
+// Run with: S2_ENDPOINT=http://localhost:8787 S2_TOKEN=s2_xxx \
+//          [S2_BASE_PATH=/scope/] go test -tags e2e ./internal/sync/
+//
+// S2_TOKEN is the parent token used to spawn per-test child tokens via
+// delegation. S2_BASE_PATH is its absolute base_path (the API never
+// exposes it to clients); defaults to "/" when unset, which works for a
+// root-scoped parent token.
 //
 // Scenario IDs correspond to ADR 0032.
 
@@ -16,9 +22,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
+
+// parentBasePath returns S2_BASE_PATH (defaulting to "/"), with a
+// trailing slash so callers can concatenate child paths. The server
+// keeps base_path opaque, so the test runner has to declare it.
+func parentBasePath() string {
+	bp := os.Getenv("S2_BASE_PATH")
+	if bp == "" {
+		bp = "/"
+	}
+	if !strings.HasSuffix(bp, "/") {
+		bp += "/"
+	}
+	return bp
+}
 
 // --- Scenario registry (ADR 0032 テスト漏れ防止) ---
 
@@ -74,39 +95,28 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal("S2_ENDPOINT and S2_TOKEN must be set")
 	}
 
-	// Resolve the parent token's base_path so child paths are always within scope.
-	// S2_TOKEN can be root or scoped — tests must not assume either.
-	rc := client.New(endpoint, token)
-	me, err := rc.Me()
-	if err != nil {
-		t.Fatalf("Me: %v", err)
-	}
-	parentBasePath := me.BasePath
-	if parentBasePath == "" {
-		parentBasePath = "/"
-	}
-	if !strings.HasSuffix(parentBasePath, "/") {
-		parentBasePath += "/"
-	}
+	// Use the configured parent base_path (server keeps it opaque).
+	rc := client.New(endpoint, auth.NewStaticSource(token))
+	parentBase := parentBasePath()
 
 	// Create a child token with a unique base_path for test isolation.
 	// Each test gets its own virtual root so tests don't interfere with each other.
-	uniqueBasePath := parentBasePath + "e2e-test/" + time.Now().Format("20060102-150405") + "-" + t.Name() + "/"
+	uniqueBasePath := parentBase + "e2e-test/" + time.Now().Format("20060102-150405") + "-" + t.Name() + "/"
 	childResp, err := rc.CreateToken("e2e-"+t.Name(), uniqueBasePath, true, []types.AccessPath{{Path: "/", CanRead: true, CanWrite: true}})
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
 
-	c := client.New(endpoint, childResp.RawToken)
+	c := client.New(endpoint, auth.NewStaticSource(childResp.RawToken))
 	localDir := t.TempDir()
 
 	t.Cleanup(func() {
 		cleanRemote(c, "")
 	})
 
-	childMe, err := c.Me()
+	childTI, err := c.Introspect()
 	if err != nil {
-		t.Fatalf("child Me: %v", err)
+		t.Fatalf("child Introspect: %v", err)
 	}
 
 	return &testEnv{
@@ -114,7 +124,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		client:   c,
 		localDir: localDir,
 		basePath: uniqueBasePath,
-		identity: Identity{Endpoint: endpoint, UserID: childMe.UserID, BasePath: childMe.BasePath},
+		identity: Identity{Endpoint: endpoint, UserID: childTI.UserID, TokenID: childTI.TokenID},
 	}
 }
 
@@ -248,7 +258,7 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 	plans := Compare(localFiles, remoteFiles, state.Files)
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
-	result, err := Execute(plans, e.localDir, "", e.client, state, false)
+	result, err := Execute(plans, e.localDir, e.client, state, false)
 	if err != nil {
 		e.t.Fatalf("Execute: %v", err)
 	}
@@ -333,7 +343,7 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
 
-	result, err := Execute(plans, e.localDir, "", e.client, state, false)
+	result, err := Execute(plans, e.localDir, e.client, state, false)
 	if err != nil {
 		e.t.Fatalf("Execute: %v", err)
 	}
@@ -618,7 +628,7 @@ func TestS18_Incremental_OtherDevicePush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
-	device2 := client.New(os.Getenv("S2_ENDPOINT"), childResp.RawToken)
+	device2 := client.New(os.Getenv("S2_ENDPOINT"), auth.NewStaticSource(childResp.RawToken))
 
 	env.writeLocal("file.txt", "v1")
 	env.sync() // initial sync with device 1
@@ -774,7 +784,7 @@ func TestS32_PullDuringLocalEdit(t *testing.T) {
 	plans := CompareIncremental(localFiles, state.Files, remoteChanges)
 
 	localEdited := false
-	result, err := execute(plans, env.localDir, "", env.client, state, false, executeDeps{
+	result, err := execute(plans, env.localDir, env.client, state, false, executeDeps{
 		beforePullCommit: func(localPath string) {
 			// Simulate concurrent local edit during pull
 			os.WriteFile(localPath, []byte("local-edit-during-pull"), 0644)
@@ -810,21 +820,12 @@ func (e *testEnv) parentRelPath(parentBasePath, relPath string) string {
 }
 
 // parentClient creates a client using S2_TOKEN (the parent token).
+// The parent's absolute base_path is taken from S2_BASE_PATH (defaulting
+// to "/") because the API does not expose it.
 func parentClient(t *testing.T) (*client.Client, string) {
 	t.Helper()
-	c := client.New(os.Getenv("S2_ENDPOINT"), os.Getenv("S2_TOKEN"))
-	me, err := c.Me()
-	if err != nil {
-		t.Fatalf("Me: %v", err)
-	}
-	basePath := me.BasePath
-	if basePath == "" {
-		basePath = "/"
-	}
-	if !strings.HasSuffix(basePath, "/") {
-		basePath += "/"
-	}
-	return c, basePath
+	c := client.New(os.Getenv("S2_ENDPOINT"), auth.NewStaticSource(os.Getenv("S2_TOKEN")))
+	return c, parentBasePath()
 }
 
 // TestScoped_CrossToken tests that changes uploaded via one token are visible
@@ -891,7 +892,7 @@ func TestScoped_S22_AncestorMoveBecomesDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateToken: %v", err)
 	}
-	nestedClient := client.New(os.Getenv("S2_ENDPOINT"), childResp.RawToken)
+	nestedClient := client.New(os.Getenv("S2_ENDPOINT"), auth.NewStaticSource(childResp.RawToken))
 
 	// Seed a file so the directory exists on the server
 	if _, err := pc.Upload(innerPath+"seed.txt", strings.NewReader("seed"), "", -1); err != nil {

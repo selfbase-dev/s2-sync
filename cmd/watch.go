@@ -23,8 +23,8 @@ var watchCmd = &cobra.Command{
 	Short: "Watch and sync local directory with S2 remote",
 	Long: `Continuously sync between a local directory and the S2 remote.
 
-The remote path is determined by the token's base_path.
-Watches for local file changes and polls the remote for updates. Runs until interrupted (Ctrl-C).`,
+The remote scope is determined by the token. Watches for local file
+changes and polls the remote for updates. Runs until interrupted (Ctrl-C).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runWatch,
 }
@@ -37,7 +37,7 @@ func init() {
 func runWatch(cmd *cobra.Command, args []string) error {
 	localDir := args[0]
 
-	c, remotePrefix, state, err := s2sync.Open(localDir, viper.GetString("endpoint"))
+	c, state, err := s2sync.Open(localDir, viper.GetString("endpoint"))
 	if err != nil {
 		return err
 	}
@@ -66,9 +66,9 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	cb := s2sync.WatchCallbacks{
 		SyncFn: func() error {
 			if state.Cursor == "" {
-				return s2sync.RunInitialSync(c, localDir, remotePrefix, state, syncOpts)
+				return s2sync.RunInitialSync(c, localDir, state, syncOpts)
 			}
-			return s2sync.RunIncrementalSync(c, localDir, remotePrefix, state, syncOpts)
+			return s2sync.RunIncrementalSync(c, localDir, state, syncOpts)
 		},
 		PollFn: func() (bool, bool, error) {
 			cursor := state.Cursor
@@ -94,7 +94,6 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	Logger().Info("sync.start", "phase", "initial")
 	Logger().Info("watch.start",
 		"local", localDir,
-		"remote", remotePrefix,
 		"poll_interval", watchPollInterval.String(),
 	)
 	if err := s2sync.RunWatchLoop(ctx, opts, state, cb); err != nil {

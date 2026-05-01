@@ -13,7 +13,7 @@ import (
 // poll loop, debounced re-sync. Wires the GUI service's status reporting
 // into the shared s2sync.RunWatchLoop so behaviour stays in lockstep
 // with the CLI watch command.
-func (s *SyncService) run(ctx context.Context, c *client.Client, state *s2sync.State, localDir, remotePrefix string) {
+func (s *SyncService) run(ctx context.Context, c *client.Client, state *s2sync.State, localDir string) {
 	defer close(s.done)
 	defer func() {
 		s.mu.Lock()
@@ -30,9 +30,9 @@ func (s *SyncService) run(ctx context.Context, c *client.Client, state *s2sync.S
 	cb := s2sync.WatchCallbacks{
 		SyncFn: func() error {
 			if state.Cursor == "" {
-				return s2sync.RunInitialSync(c, localDir, remotePrefix, state, syncOpts)
+				return s2sync.RunInitialSync(c, localDir, state, syncOpts)
 			}
-			return s2sync.RunIncrementalSync(c, localDir, remotePrefix, state, syncOpts)
+			return s2sync.RunIncrementalSync(c, localDir, state, syncOpts)
 		},
 		PollFn: func() (bool, bool, error) {
 			cursor := state.Cursor

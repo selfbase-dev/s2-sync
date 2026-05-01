@@ -15,13 +15,18 @@ import (
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
-// Identity is the (endpoint, user, scope) tuple under which the archive
+// Identity is the (endpoint, user, token) tuple under which the archive
 // was populated. A mismatch at load time means the archive is stale for
 // the current token and must be discarded.
+//
+// TokenID is required because the same user can issue multiple tokens
+// scoped to different base_paths; switching tokens on the same local
+// dir must not silently reuse the previous scope's cursor / files /
+// pushed_seqs. The token's base_path itself is opaque to s2-sync.
 type Identity struct {
 	Endpoint string
 	UserID   string
-	BasePath string
+	TokenID  string
 }
 
 // State wraps the SQLite-backed archive plus in-memory working set.
@@ -84,8 +89,8 @@ func LockPath(syncRoot string) string { return filepath.Join(StateDir(syncRoot),
 //  2. Open/create state.db with the expected schema.
 //     Corruption or version mismatch → quarantine + recreate.
 //  3. Read state_meta + files + pushed_seqs into memory.
-//  4. If identity (endpoint/user/base_path) doesn't match the loaded
-//     row, discard the archive and start fresh (full resync).
+//  4. If identity (endpoint/user/token) doesn't match the loaded row,
+//     discard the archive and start fresh (full resync).
 //
 // identity carries the current token's fingerprint; at first run the
 // stored identity is empty and gets written on the first Save.
@@ -148,7 +153,7 @@ func openAndLoad(syncRoot string, identity Identity) (*State, error) {
 		Cursor:             snap.Cursor,
 		ReportedCollisions: parseCollisionKeys(snap.CollisionKeys),
 		pushedSeqs:         make(map[int64]struct{}, len(snap.PushedSeqs)),
-		identity:           Identity{Endpoint: snap.Endpoint, UserID: snap.UserID, BasePath: snap.BasePath},
+		identity:           Identity{Endpoint: snap.Endpoint, UserID: snap.UserID, TokenID: snap.TokenID},
 		dirty:              make(map[string]struct{}),
 		db:                 db,
 		root:               syncRoot,
@@ -207,7 +212,7 @@ func (s *State) quarantineAndReopen(syncRoot string, identity Identity) error {
 }
 
 func (id Identity) isEmpty() bool {
-	return id.Endpoint == "" && id.UserID == "" && id.BasePath == ""
+	return id.Endpoint == "" && id.UserID == "" && id.TokenID == ""
 }
 
 // Close releases the DB handle and the advisory lock. Callers must
@@ -250,7 +255,7 @@ func (s *State) Save() error {
 		Cursor:        s.Cursor,
 		Endpoint:      s.identity.Endpoint,
 		UserID:        s.identity.UserID,
-		BasePath:      s.identity.BasePath,
+		TokenID:       s.identity.TokenID,
 		CollisionKeys: encodeCollisionKeys(s.ReportedCollisions),
 		ClearAll:      s.clearAll,
 	}

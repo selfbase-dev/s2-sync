@@ -133,7 +133,7 @@ func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 		return err
 	}
 
-	c, remotePrefix, state, err := s2sync.Open(mount.Path, s.endpoint)
+	c, state, err := s2sync.Open(mount.Path, s.endpoint)
 	if err != nil {
 		return fail(err)
 	}
@@ -142,7 +142,7 @@ func (s *SyncService) Start(ctx context.Context, mount Mount) error {
 
 	// Bind the client to runCtx so Stop's cancel aborts any in-flight
 	// HTTP request (Bootstrap / Pull / Push etc.).
-	go s.run(runCtx, c.WithContext(runCtx), state, mount.Path, remotePrefix)
+	go s.run(runCtx, c.WithContext(runCtx), state, mount.Path)
 	return nil
 }
 

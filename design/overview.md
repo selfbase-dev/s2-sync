@@ -54,7 +54,7 @@ SQLite (WAL), managed in `statedb.go`. Three tables:
 
 | table          | role                                                                                   |
 |----------------|----------------------------------------------------------------------------------------|
-| `state_meta`   | cursor / endpoint / user_id / base_path / collision_keys                               |
+| `state_meta`   | cursor / endpoint / user_id / token_id / collision_keys                                |
 | `files`        | the archive itself (path → local_hash, content_version, revision_id)                   |
 | `pushed_seqs`  | seqs of our own pushes — filtered out of the next poll so we don't pull our own writes |
 
@@ -109,4 +109,4 @@ Dependency direction is one-way: `cmd` / `gui` → `service` → `sync` → `cli
 - Conflict resolution is fixed to local-wins (no 3-way content merge)
 - Local change detection is full walk + hash, not inotify-diff
 - Symlinks and special files are unsupported; empty local directories are not synced
-- Sync scope is whatever falls under the token's `base_path`. Different scopes need a different token and a different directory.
+- Sync scope is whatever the token grants; the absolute scope path is opaque to the client (the API exposes only relative paths). Different scopes need a different token and a different directory.

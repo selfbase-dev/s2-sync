@@ -39,21 +39,22 @@ func (d executeDeps) log() *slog.Logger {
 }
 
 // Execute applies the sync plans against local filesystem and remote storage.
+//
+// All plan paths are relative to the token's base_path (which the server
+// keeps opaque); they are sent to the API as-is.
 func Execute(
 	plans []types.SyncPlan,
 	localRoot string,
-	remotePrefix string,
 	c *client.Client,
 	state *State,
 	dryRun bool,
 ) (*ExecuteResult, error) {
-	return execute(plans, localRoot, remotePrefix, c, state, dryRun, executeDeps{})
+	return execute(plans, localRoot, c, state, dryRun, executeDeps{})
 }
 
 func execute(
 	plans []types.SyncPlan,
 	localRoot string,
-	remotePrefix string,
 	c *client.Client,
 	state *State,
 	dryRun bool,
@@ -68,7 +69,7 @@ func execute(
 			result.Errors = append(result.Errors, fmt.Errorf("unsafe plan path %s: %w", plan.Path, err))
 			continue
 		}
-		remoteKey := path.Join(remotePrefix, plan.Path)
+		remoteKey := plan.Path
 
 		switch plan.Action {
 		case types.Push:
@@ -169,8 +170,7 @@ func execute(
 				result.Moved++
 				continue
 			}
-			srcKey := path.Join(remotePrefix, plan.From)
-			moveResult, err := c.Move(srcKey, remoteKey)
+			moveResult, err := c.Move(plan.From, remoteKey)
 			if err != nil {
 				if errors.Is(err, client.ErrMoveConflict) {
 					// destination exists → treat as SkipCaseConflict,
