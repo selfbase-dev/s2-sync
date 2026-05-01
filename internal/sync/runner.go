@@ -31,7 +31,7 @@ func (o SyncOptions) logger() *slog.Logger {
 
 // RunInitialSync orchestrates a full initial sync: clear archive, walk
 // local, bootstrap remote (ADR 0046), compare, execute, persist state.
-func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *State, opts SyncOptions) error {
+func RunInitialSync(c *client.Client, localDir string, state *State, opts SyncOptions) error {
 	state.ClearFiles()
 
 	caseInsensitive := IsCaseInsensitiveFS(localDir)
@@ -61,7 +61,7 @@ func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *Stat
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
 
-	result, err := executePlans(plans, localDir, remotePrefix, c, state, opts)
+	result, err := executePlans(plans, localDir, c, state, opts)
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func RunInitialSync(c *client.Client, localDir, remotePrefix string, state *Stat
 
 // RunIncrementalSync orchestrates an incremental sync from the current
 // cursor. Falls back to RunInitialSync on cursor expiry.
-func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *State, opts SyncOptions) error {
+func RunIncrementalSync(c *client.Client, localDir string, state *State, opts SyncOptions) error {
 	caseInsensitive := IsCaseInsensitiveFS(localDir)
 
 	exclude := LoadExclude(localDir)
@@ -96,7 +96,7 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 	if err == client.ErrCursorGone {
 		opts.logger().Warn(slog2.SyncStart, "reason", "cursor_expired_falling_back_to_full")
 		state.Cursor = ""
-		return RunInitialSync(c, localDir, remotePrefix, state, opts)
+		return RunInitialSync(c, localDir, state, opts)
 	}
 	if err != nil {
 		return fmt.Errorf("poll changes failed: %w", err)
@@ -149,7 +149,7 @@ func RunIncrementalSync(c *client.Client, localDir, remotePrefix string, state *
 		opts.logger().Info(slog2.SyncIdle)
 	}
 
-	result, err := executePlans(plans, localDir, remotePrefix, c, state, opts)
+	result, err := executePlans(plans, localDir, c, state, opts)
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ func reportCollisions(groups []CollisionGroup, state *State, opts SyncOptions) {
 
 // executePlans runs the max-delete safety check, prints plan summary,
 // and executes. Returns nil result when plans is empty.
-func executePlans(plans []types.SyncPlan, localDir, remotePrefix string, c *client.Client, state *State, opts SyncOptions) (*ExecuteResult, error) {
+func executePlans(plans []types.SyncPlan, localDir string, c *client.Client, state *State, opts SyncOptions) (*ExecuteResult, error) {
 	if len(plans) == 0 {
 		return nil, nil
 	}
@@ -249,7 +249,7 @@ func executePlans(plans []types.SyncPlan, localDir, remotePrefix string, c *clie
 		"dry_run", opts.DryRun,
 	)
 
-	result, err := executeWithLogger(plans, localDir, remotePrefix, c, state, opts.DryRun, opts.logger())
+	result, err := executeWithLogger(plans, localDir, c, state, opts.DryRun, opts.logger())
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func executePlans(plans []types.SyncPlan, localDir, remotePrefix string, c *clie
 // executeWithLogger is a thin wrapper used by runner.go to thread the
 // logger into Execute without breaking the public Execute signature
 // (still used by tests / external callers).
-func executeWithLogger(plans []types.SyncPlan, localRoot, remotePrefix string, c *client.Client, state *State, dryRun bool, logger *slog.Logger) (*ExecuteResult, error) {
-	return execute(plans, localRoot, remotePrefix, c, state, dryRun, executeDeps{logger: logger})
+func executeWithLogger(plans []types.SyncPlan, localRoot string, c *client.Client, state *State, dryRun bool, logger *slog.Logger) (*ExecuteResult, error) {
+	return execute(plans, localRoot, c, state, dryRun, executeDeps{logger: logger})
 }
 

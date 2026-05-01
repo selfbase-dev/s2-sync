@@ -27,13 +27,13 @@ type CreateTokenResponse struct {
 
 // --- API response types (matching OpenAPI spec) ---
 
-// MeTokenResponse from GET /api/v1/me (token auth).
-type MeTokenResponse struct {
-	Type        string       `json:"type"`
+// TokenIntrospection from GET /api/v1/token. Token holders never learn
+// the absolute position of their base_path within the delegator's tree;
+// all paths in API responses are relative to the token's base_path.
+type TokenIntrospection struct {
 	UserID      string       `json:"user_id"`
 	TokenID     string       `json:"token_id"`
 	CanDelegate bool         `json:"can_delegate"`
-	BasePath    string       `json:"base_path"`
 	AccessPaths []AccessPath `json:"access_paths"`
 }
 

@@ -41,16 +41,16 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("save session: %w", err)
 	}
 
-	// Verify by hitting /api/v1/me with the freshly-issued access token.
+	// Verify by hitting /api/v1/token with the freshly-issued access token.
 	source, err := auth.NewSource(endpoint)
 	if err != nil {
 		return err
 	}
-	me, err := client.New(endpoint, source).Me()
+	ti, err := client.New(endpoint, source).Introspect()
 	if err != nil {
 		return fmt.Errorf("verify: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Signed in as %s (token %s)\n", me.UserID, me.TokenID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Signed in as %s (token %s)\n", ti.UserID, ti.TokenID)
 	return nil
 }

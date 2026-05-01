@@ -104,14 +104,14 @@ func TestFormatETag(t *testing.T) {
 	}
 }
 
-// --- /api/v1/me ---
+// --- /api/v1/token ---
 
-func TestMe_Success(t *testing.T) {
+func TestIntrospect_Success(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
-		"GET /api/v1/me": func(w http.ResponseWriter, r *http.Request) {
+		"GET /api/v1/token": func(w http.ResponseWriter, r *http.Request) {
 			requireAuth(t, r, "s2_testtoken")
 			jsonResponse(w, 200, map[string]any{
-				"type": "token", "user_id": "user_1", "token_id": "tok_1",
+				"user_id": "user_1", "token_id": "tok_1",
 				"can_delegate": false,
 				"access_paths": []map[string]any{{"path": "/", "can_read": true, "can_write": true}},
 			})
@@ -119,32 +119,32 @@ func TestMe_Success(t *testing.T) {
 	})
 
 	c := New(srv.URL, auth.NewStaticSource("s2_testtoken"))
-	me, err := c.Me()
+	ti, err := c.Introspect()
 	if err != nil {
-		t.Fatalf("Me() error: %v", err)
+		t.Fatalf("Introspect() error: %v", err)
 	}
-	if me.TokenID != "tok_1" {
-		t.Errorf("TokenID = %q, want %q", me.TokenID, "tok_1")
+	if ti.TokenID != "tok_1" {
+		t.Errorf("TokenID = %q, want %q", ti.TokenID, "tok_1")
 	}
-	if me.UserID != "user_1" {
-		t.Errorf("UserID = %q, want %q", me.UserID, "user_1")
+	if ti.UserID != "user_1" {
+		t.Errorf("UserID = %q, want %q", ti.UserID, "user_1")
 	}
-	if len(me.AccessPaths) != 1 {
-		t.Errorf("AccessPaths len = %d, want 1", len(me.AccessPaths))
+	if len(ti.AccessPaths) != 1 {
+		t.Errorf("AccessPaths len = %d, want 1", len(ti.AccessPaths))
 	}
 }
 
-func TestMe_Unauthorized(t *testing.T) {
+func TestIntrospect_Unauthorized(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
-		"GET /api/v1/me": func(w http.ResponseWriter, r *http.Request) {
+		"GET /api/v1/token": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(401)
 		},
 	})
 
 	c := New(srv.URL, auth.NewStaticSource("s2_bad"))
-	_, err := c.Me()
+	_, err := c.Introspect()
 	if err != ErrUnauthorized {
-		t.Errorf("Me() error = %v, want ErrUnauthorized", err)
+		t.Errorf("Introspect() error = %v, want ErrUnauthorized", err)
 	}
 }
 
@@ -727,15 +727,18 @@ func TestCreateToken_Forbidden(t *testing.T) {
 	}
 }
 
-// --- /api/v1/file-moves ---
+// --- /api/v1/files-move ---
 
 func TestMove_Success(t *testing.T) {
 	srv := newTestServer(t, map[string]http.HandlerFunc{
-		"POST /api/v1/file-moves/": func(w http.ResponseWriter, r *http.Request) {
+		"POST /api/v1/files-move": func(w http.ResponseWriter, r *http.Request) {
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
-			if body["destination"] != "new/path.txt" {
-				t.Errorf("destination = %v", body["destination"])
+			if body["from"] != "old/path.txt" {
+				t.Errorf("from = %v, want old/path.txt", body["from"])
+			}
+			if body["to"] != "new/path.txt" {
+				t.Errorf("to = %v, want new/path.txt", body["to"])
 			}
 			jsonResponse(w, 200, map[string]any{"id": "n1", "seq": int64(42), "content_version": int64(3)})
 		},

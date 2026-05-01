@@ -1,15 +1,18 @@
 package sync
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 var testIdentity = Identity{
 	Endpoint: "https://s2.example",
 	UserID:   "user_test",
-	BasePath: "/",
+	TokenID:  "tok_test",
 }
 
 func TestLoadState_NoDB(t *testing.T) {
@@ -107,7 +110,7 @@ func TestLoadState_IdentityMismatchResets(t *testing.T) {
 	state.Close()
 
 	// Reopen with a different identity → archive must be dropped.
-	otherIdentity := Identity{Endpoint: "https://other.example", UserID: "user_other", BasePath: "/"}
+	otherIdentity := Identity{Endpoint: "https://other.example", UserID: "user_other", TokenID: "tok_other"}
 	reloaded, err := LoadState(dir, otherIdentity)
 	if err != nil {
 		t.Fatalf("LoadState (new identity): %v", err)
@@ -122,6 +125,98 @@ func TestLoadState_IdentityMismatchResets(t *testing.T) {
 	}
 	if reloaded.IsPushedSeq(0) {
 		t.Error("pushed seqs should be cleared on identity mismatch")
+	}
+}
+
+// Same user with a different token = different scope. The archive must
+// reset, otherwise the previous token's cursor / files / pushed_seqs
+// leak into the new scope and cause spurious deletes / pulls.
+func TestLoadState_TokenSwitchResets(t *testing.T) {
+	dir := t.TempDir()
+	state, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	state.Cursor = "scope-A-cursor"
+	state.RecordFile("a.txt", "h", 1, "")
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	state.Close()
+
+	// Same endpoint + user, different token → archive must be dropped.
+	swapped := testIdentity
+	swapped.TokenID = "tok_other"
+	reloaded, err := LoadState(dir, swapped)
+	if err != nil {
+		t.Fatalf("LoadState (token switch): %v", err)
+	}
+	defer reloaded.Close()
+
+	if reloaded.Cursor != "" {
+		t.Errorf("Cursor = %q after token switch, want empty", reloaded.Cursor)
+	}
+	if len(reloaded.Files) != 0 {
+		t.Errorf("Files len = %d after token switch, want 0", len(reloaded.Files))
+	}
+}
+
+// Opening a v2 (or any non-current) state.db must quarantine the old
+// file and start fresh. Verifies the schema-mismatch path that this PR
+// relies on for v2 → v3 migration.
+func TestLoadState_SchemaVersionMismatch_Quarantines(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".s2"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hand-build a "v2" state.db: schemaSQL minus token_id, with
+	// PRAGMA user_version = 2.
+	dbPath := DBPath(dir)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	v2SQL := `
+		CREATE TABLE state_meta (
+		    id INTEGER PRIMARY KEY CHECK (id = 1),
+		    cursor TEXT NOT NULL DEFAULT '',
+		    endpoint TEXT NOT NULL DEFAULT '',
+		    user_id TEXT NOT NULL DEFAULT '',
+		    base_path TEXT NOT NULL DEFAULT '',
+		    collision_keys TEXT NOT NULL DEFAULT ''
+		);
+		INSERT INTO state_meta (id, cursor, base_path) VALUES (1, 'v2-cursor', '/old-scope/');
+		CREATE TABLE files (
+		    path TEXT PRIMARY KEY,
+		    local_hash TEXT NOT NULL,
+		    content_version INTEGER NOT NULL,
+		    revision_id TEXT NOT NULL DEFAULT ''
+		) WITHOUT ROWID;
+		CREATE TABLE pushed_seqs (seq INTEGER PRIMARY KEY);
+		PRAGMA user_version = 2;
+	`
+	if _, err := db.Exec(v2SQL); err != nil {
+		t.Fatalf("seed v2 schema: %v", err)
+	}
+	db.Close()
+
+	state, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatalf("LoadState (v2 → v3): %v", err)
+	}
+	defer state.Close()
+
+	if state.Cursor != "" {
+		t.Errorf("Cursor = %q after schema reset, want empty", state.Cursor)
+	}
+	if len(state.Files) != 0 {
+		t.Errorf("Files len = %d after schema reset, want 0", len(state.Files))
+	}
+
+	entries, _ := filepath.Glob(dbPath + ".corrupt.*")
+	if len(entries) == 0 {
+		t.Error("expected v2 DB to be quarantined under .corrupt.*")
 	}
 }
 

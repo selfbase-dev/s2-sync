@@ -245,15 +245,15 @@ func (c *Client) Delete(path string) (*types.DeleteResult, error) {
 	return result, nil
 }
 
-// ErrMoveConflict is returned when POST /api/v1/file-moves returns 409
+// ErrMoveConflict is returned when POST /api/v1/files-move returns 409
 // (destination already exists or cycle detected). Callers should treat
 // this as SkipCaseConflict per the collision policy — do NOT fall back to
 // delete+push, which is not atomic and can lose data.
 var ErrMoveConflict = fmt.Errorf("move conflict: destination exists or cycle")
 
-// Move moves or renames a file/directory via POST /api/v1/file-moves/{src}.
-// On 409 the returned error wraps ErrMoveConflict so callers can detect
-// the collision case without string-matching.
+// Move moves or renames a file/directory via POST /api/v1/files-move
+// with body {from, to}. On 409 the returned error wraps ErrMoveConflict
+// so callers can detect the collision case without string-matching.
 //
 // The second return (*types.MoveResult) is populated on 200 with the
 // new node's changelog seq and content_version — needed by the sync
@@ -261,14 +261,15 @@ var ErrMoveConflict = fmt.Errorf("move conflict: destination exists or cycle")
 // archive row in place.
 func (c *Client) Move(srcPath, dstPath string) (*types.MoveResult, error) {
 	payload := struct {
-		Destination string `json:"destination"`
-	}{Destination: dstPath}
+		From string `json:"from"`
+		To   string `json:"to"`
+	}{From: srcPath, To: dstPath}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(c.reqContext(), "POST", c.endpoint+"/api/v1/file-moves/"+srcPath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(c.reqContext(), "POST", c.endpoint+"/api/v1/files-move", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

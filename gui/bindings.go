@@ -69,7 +69,7 @@ func (a *App) StartOAuthLogin() error {
 	if err != nil {
 		return err
 	}
-	if _, err := client.New(a.endpoint, source).Me(); err != nil {
+	if _, err := client.New(a.endpoint, source).Introspect(); err != nil {
 		return fmt.Errorf("verify: %w", err)
 	}
 	return nil

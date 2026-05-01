@@ -3,7 +3,6 @@ package sync
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/auth"
 	"github.com/selfbase-dev/s2-sync/internal/client"
@@ -15,40 +14,42 @@ import (
 //
 // All three call sites (cmd sync, cmd watch, service.SyncService) need the
 // same wiring; keep the duplication here, not in each command.
-func Open(localDir, endpoint string) (c *client.Client, remotePrefix string, state *State, err error) {
+//
+// All paths exchanged with the server are relative to the token's
+// base_path, which is opaque to s2-sync.
+func Open(localDir, endpoint string) (c *client.Client, state *State, err error) {
 	info, statErr := os.Stat(localDir)
 	if statErr != nil {
-		return nil, "", nil, fmt.Errorf("local directory not found: %w", statErr)
+		return nil, nil, fmt.Errorf("local directory not found: %w", statErr)
 	}
 	if !info.IsDir() {
-		return nil, "", nil, fmt.Errorf("%s is not a directory", localDir)
+		return nil, nil, fmt.Errorf("%s is not a directory", localDir)
 	}
 
 	if err := EnsureIgnoreFile(localDir); err != nil {
-		return nil, "", nil, fmt.Errorf("create .s2ignore: %w", err)
+		return nil, nil, fmt.Errorf("create .s2ignore: %w", err)
 	}
 
 	source, err := auth.NewSource(endpoint)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, nil, err
 	}
 	c = client.New(endpoint, source)
 
-	me, err := c.Me()
+	ti, err := c.Introspect()
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("auth: %w", err)
+		return nil, nil, fmt.Errorf("auth: %w", err)
 	}
-	remotePrefix = strings.TrimPrefix(me.BasePath, "/")
 
 	identity := Identity{
 		Endpoint: endpoint,
-		UserID:   me.UserID,
-		BasePath: me.BasePath,
+		UserID:   ti.UserID,
+		TokenID:  ti.TokenID,
 	}
 	state, err = LoadState(localDir, identity)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("load state: %w", err)
+		return nil, nil, fmt.Errorf("load state: %w", err)
 	}
 
-	return c, remotePrefix, state, nil
+	return c, state, nil
 }

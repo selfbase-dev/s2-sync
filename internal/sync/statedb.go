@@ -16,10 +16,12 @@ import (
 // .s2/state.db triggers a full reset (quarantine + recreate), per the
 // "state.db is a cache" policy.
 //
-// v2: adds collision_keys to state_meta for warning debounce. The
-// bump also forces a clean rescan on upgrade, so legacy archive rows
-// with pre-normalized paths are rebuilt to the NFC canonical form.
-const schemaVersion = 2
+// v2: adds collision_keys to state_meta for warning debounce.
+// v3: drops base_path (server keeps it opaque) and adds token_id so the
+// archive is keyed to (endpoint, user_id, token_id). Switching tokens
+// scoped to different sub-trees on the same local dir must trigger a
+// full resync, which (user_id) alone cannot detect.
+const schemaVersion = 3
 
 const schemaSQL = `
 PRAGMA journal_mode = WAL;
@@ -29,7 +31,7 @@ CREATE TABLE IF NOT EXISTS state_meta (
     cursor          TEXT NOT NULL DEFAULT '',
     endpoint        TEXT NOT NULL DEFAULT '',
     user_id         TEXT NOT NULL DEFAULT '',
-    base_path       TEXT NOT NULL DEFAULT '',
+    token_id        TEXT NOT NULL DEFAULT '',
     collision_keys  TEXT NOT NULL DEFAULT ''
 );
 INSERT OR IGNORE INTO state_meta (id) VALUES (1);
@@ -116,13 +118,13 @@ func quarantineDB(dbPath string) error {
 
 // dbSnapshot is everything pulled from the DB at LoadState time.
 type dbSnapshot struct {
-	Cursor         string
-	Endpoint       string
-	UserID         string
-	BasePath       string
-	CollisionKeys  string
-	Files          map[string]types.FileState
-	PushedSeqs     []int64
+	Cursor        string
+	Endpoint      string
+	UserID        string
+	TokenID       string
+	CollisionKeys string
+	Files         map[string]types.FileState
+	PushedSeqs    []int64
 }
 
 func loadSnapshot(db *sql.DB) (*dbSnapshot, error) {
@@ -130,8 +132,8 @@ func loadSnapshot(db *sql.DB) (*dbSnapshot, error) {
 		Files: make(map[string]types.FileState),
 	}
 
-	row := db.QueryRow(`SELECT cursor, endpoint, user_id, base_path, collision_keys FROM state_meta WHERE id = 1`)
-	if err := row.Scan(&snap.Cursor, &snap.Endpoint, &snap.UserID, &snap.BasePath, &snap.CollisionKeys); err != nil {
+	row := db.QueryRow(`SELECT cursor, endpoint, user_id, token_id, collision_keys FROM state_meta WHERE id = 1`)
+	if err := row.Scan(&snap.Cursor, &snap.Endpoint, &snap.UserID, &snap.TokenID, &snap.CollisionKeys); err != nil {
 		return nil, fmt.Errorf("read state_meta: %w", err)
 	}
 
@@ -172,7 +174,7 @@ type flushParams struct {
 	Cursor        string
 	Endpoint      string
 	UserID        string
-	BasePath      string
+	TokenID       string
 	CollisionKeys string
 
 	Upserts map[string]types.FileState
@@ -192,8 +194,8 @@ func flush(db *sql.DB, p flushParams) error {
 	defer tx.Rollback()
 
 	if _, err := tx.Exec(
-		`UPDATE state_meta SET cursor = ?, endpoint = ?, user_id = ?, base_path = ?, collision_keys = ? WHERE id = 1`,
-		p.Cursor, p.Endpoint, p.UserID, p.BasePath, p.CollisionKeys,
+		`UPDATE state_meta SET cursor = ?, endpoint = ?, user_id = ?, token_id = ?, collision_keys = ? WHERE id = 1`,
+		p.Cursor, p.Endpoint, p.UserID, p.TokenID, p.CollisionKeys,
 	); err != nil {
 		return fmt.Errorf("update state_meta: %w", err)
 	}

@@ -133,9 +133,11 @@ func readErrorBody(resp *http.Response) string {
 	return string(body)
 }
 
-// Me returns the auth context for the current token.
-func (c *Client) Me() (*types.MeTokenResponse, error) {
-	req, err := http.NewRequestWithContext(c.reqContext(), "GET", c.url("/api/v1/me"), nil)
+// Introspect returns the auth context for the current token via
+// GET /api/v1/token. Token holders cannot learn their base_path's
+// absolute position — all paths in API responses are base_path-relative.
+func (c *Client) Introspect() (*types.TokenIntrospection, error) {
+	req, err := http.NewRequestWithContext(c.reqContext(), "GET", c.url("/api/v1/token"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -153,11 +155,11 @@ func (c *Client) Me() (*types.MeTokenResponse, error) {
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
-	var me types.MeTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
-		return nil, fmt.Errorf("failed to parse /api/v1/me response: %w", err)
+	var ti types.TokenIntrospection
+	if err := json.NewDecoder(resp.Body).Decode(&ti); err != nil {
+		return nil, fmt.Errorf("failed to parse /api/v1/token response: %w", err)
 	}
-	return &me, nil
+	return &ti, nil
 }
 
 // --- ETag helpers ---
