@@ -41,7 +41,6 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("save session: %w", err)
 	}
 
-	// Verify by hitting /api/v1/token with the freshly-issued access token.
 	source, err := auth.NewSource(endpoint)
 	if err != nil {
 		return err

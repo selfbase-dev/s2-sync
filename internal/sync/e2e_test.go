@@ -14,8 +14,11 @@
 package sync
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +42,47 @@ func parentBasePath() string {
 		bp += "/"
 	}
 	return bp
+}
+
+// createChildToken delegates a new token via POST /api/v1/tokens using
+// the parent's bearer credential. Lives in test code so the production
+// client surface does not advertise a delegation API it never uses.
+func createChildToken(t *testing.T, endpoint, parentToken, name, basePath string, canDelegate bool, accessPaths []types.AccessPath) string {
+	t.Helper()
+	if accessPaths == nil {
+		accessPaths = []types.AccessPath{}
+	}
+	body, err := json.Marshal(map[string]any{
+		"name":         name,
+		"base_path":    basePath,
+		"can_delegate": canDelegate,
+		"access_paths": accessPaths,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req, err := http.NewRequest("POST", endpoint+"/api/v1/tokens", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+parentToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delegate %s: %v", name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("delegate %s status %d: %s", name, resp.StatusCode, string(b))
+	}
+	var out struct {
+		RawToken string `json:"raw_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode delegate response: %v", err)
+	}
+	return out.RawToken
 }
 
 // --- Scenario registry (ADR 0032 テスト漏れ防止) ---
@@ -80,6 +124,8 @@ func TestMain(m *testing.M) {
 type testEnv struct {
 	t              *testing.T
 	client         *client.Client
+	rawToken       string // child raw token, for tests that delegate further (S18, S22)
+	endpoint       string
 	localDir       string
 	basePath       string // token's virtual root (e.g. "/" or "/e2e-scope/")
 	identity       Identity
@@ -95,19 +141,13 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal("S2_ENDPOINT and S2_TOKEN must be set")
 	}
 
-	// Use the configured parent base_path (server keeps it opaque).
-	rc := client.New(endpoint, auth.NewStaticSource(token))
-	parentBase := parentBasePath()
-
 	// Create a child token with a unique base_path for test isolation.
 	// Each test gets its own virtual root so tests don't interfere with each other.
+	parentBase := parentBasePath()
 	uniqueBasePath := parentBase + "e2e-test/" + time.Now().Format("20060102-150405") + "-" + t.Name() + "/"
-	childResp, err := rc.CreateToken("e2e-"+t.Name(), uniqueBasePath, true, []types.AccessPath{{Path: "/", CanRead: true, CanWrite: true}})
-	if err != nil {
-		t.Fatalf("CreateToken: %v", err)
-	}
+	childRawToken := createChildToken(t, endpoint, token, "e2e-"+t.Name(), uniqueBasePath, true, []types.AccessPath{{Path: "/", CanRead: true, CanWrite: true}})
 
-	c := client.New(endpoint, auth.NewStaticSource(childResp.RawToken))
+	c := client.New(endpoint, auth.NewStaticSource(childRawToken))
 	localDir := t.TempDir()
 
 	t.Cleanup(func() {
@@ -122,6 +162,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{
 		t:        t,
 		client:   c,
+		rawToken: childRawToken,
+		endpoint: endpoint,
 		localDir: localDir,
 		basePath: uniqueBasePath,
 		identity: Identity{Endpoint: endpoint, UserID: childTI.UserID, TokenID: childTI.TokenID},
@@ -623,12 +665,8 @@ func TestS18_Incremental_OtherDevicePush(t *testing.T) {
 	env := newTestEnv(t)
 
 	// Create a child token with the same base_path to simulate a second device.
-	// (SELF-240: create returns raw_token directly)
-	childResp, err := env.client.CreateToken("s18-device2", env.basePath, false, []types.AccessPath{{Path: "/", CanRead: true, CanWrite: true}})
-	if err != nil {
-		t.Fatalf("CreateToken: %v", err)
-	}
-	device2 := client.New(os.Getenv("S2_ENDPOINT"), auth.NewStaticSource(childResp.RawToken))
+	device2RawToken := createChildToken(t, env.endpoint, env.rawToken, "s18-device2", env.basePath, false, []types.AccessPath{{Path: "/", CanRead: true, CanWrite: true}})
+	device2 := client.New(env.endpoint, auth.NewStaticSource(device2RawToken))
 
 	env.writeLocal("file.txt", "v1")
 	env.sync() // initial sync with device 1
@@ -880,19 +918,18 @@ func TestScoped_CrossToken(t *testing.T) {
 // case #9 "ancestor move out").
 func TestScoped_S22_AncestorMoveBecomesDelete(t *testing.T) {
 	pc, parentBase := parentClient(t)
+	endpoint := os.Getenv("S2_ENDPOINT")
+	parentToken := os.Getenv("S2_TOKEN")
 
 	// Create nested token under the parent's scope:
 	// base_path = "{parentBase}s22-outer-{ts}/inner/"
 	outerDir := "s22-outer-" + time.Now().Format("150405")
 	innerPath := outerDir + "/inner/"
 	nestedBasePath := parentBase + innerPath
-	childResp, err := pc.CreateToken("s22-nested", nestedBasePath, false, []types.AccessPath{
+	nestedRawToken := createChildToken(t, endpoint, parentToken, "s22-nested", nestedBasePath, false, []types.AccessPath{
 		{Path: "/", CanRead: true, CanWrite: true},
 	})
-	if err != nil {
-		t.Fatalf("CreateToken: %v", err)
-	}
-	nestedClient := client.New(os.Getenv("S2_ENDPOINT"), auth.NewStaticSource(childResp.RawToken))
+	nestedClient := client.New(endpoint, auth.NewStaticSource(nestedRawToken))
 
 	// Seed a file so the directory exists on the server
 	if _, err := pc.Upload(innerPath+"seed.txt", strings.NewReader("seed"), "", -1); err != nil {

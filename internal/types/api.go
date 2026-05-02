@@ -1,30 +1,5 @@
 package types
 
-// --- API request types ---
-
-// CreateTokenRequest for POST /api/v1/tokens.
-type CreateTokenRequest struct {
-	Name        string       `json:"name"`
-	BasePath    string       `json:"base_path,omitempty"`
-	CanDelegate bool         `json:"can_delegate,omitempty"`
-	AccessPaths []AccessPath `json:"access_paths"`
-}
-
-// CreateTokenResponse from POST /api/v1/tokens.
-type CreateTokenResponse struct {
-	Token struct {
-		ID          string       `json:"id"`
-		Name        string       `json:"name"`
-		BasePath    string       `json:"base_path"`
-		CanDelegate bool         `json:"can_delegate"`
-		Origin      string       `json:"origin"`
-		OriginID    *string      `json:"origin_id"`
-		CreatedAt   string       `json:"created_at"`
-		AccessPaths []AccessPath `json:"access_paths"`
-	} `json:"token"`
-	RawToken string `json:"raw_token"`
-}
-
 // --- API response types (matching OpenAPI spec) ---
 
 // TokenIntrospection from GET /api/v1/token. Token holders never learn

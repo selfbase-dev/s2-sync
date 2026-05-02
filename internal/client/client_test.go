@@ -671,62 +671,6 @@ func TestCompleteUpload_SeqInResponse(t *testing.T) {
 
 // --- Move ---
 
-// --- /api/v1/tokens ---
-
-func TestCreateToken_Success(t *testing.T) {
-	srv := newTestServer(t, map[string]http.HandlerFunc{
-		"POST /api/v1/tokens": func(w http.ResponseWriter, r *http.Request) {
-			requireAuth(t, r, "s2_parent")
-			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
-			if body["name"] != "child" {
-				t.Errorf("name = %v", body["name"])
-			}
-			jsonResponse(w, 201, map[string]any{
-				"token": map[string]any{
-					"id": "tok_child", "name": "child", "base_path": "/",
-					"can_delegate": false, "origin": "delegation",
-					"origin_id": "tok_parent", "created_at": "2026-04-04T00:00:00Z",
-					"access_paths": []map[string]any{
-						{"path": "/", "can_read": true, "can_write": true},
-					},
-				},
-				"raw_token": "s2_childtoken123",
-			})
-		},
-	})
-
-	c := New(srv.URL, auth.NewStaticSource("s2_parent"))
-	resp, err := c.CreateToken("child", "/", false, []types.AccessPath{
-		{Path: "/", CanRead: true, CanWrite: true},
-	})
-	if err != nil {
-		t.Fatalf("CreateToken() error: %v", err)
-	}
-	if resp.RawToken != "s2_childtoken123" {
-		t.Errorf("raw_token = %q", resp.RawToken)
-	}
-	if resp.Token.ID != "tok_child" {
-		t.Errorf("token.id = %q", resp.Token.ID)
-	}
-	if resp.Token.Origin != "delegation" {
-		t.Errorf("origin = %q", resp.Token.Origin)
-	}
-}
-
-func TestCreateToken_Forbidden(t *testing.T) {
-	srv := newTestServer(t, map[string]http.HandlerFunc{
-		"POST /api/v1/tokens": func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(403)
-		},
-	})
-	c := New(srv.URL, auth.NewStaticSource("s2_test"))
-	_, err := c.CreateToken("child", "/", false, nil)
-	if err != ErrForbidden {
-		t.Errorf("error = %v, want ErrForbidden", err)
-	}
-}
-
 // --- /api/v1/files-move ---
 
 func TestMove_Success(t *testing.T) {
