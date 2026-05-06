@@ -41,6 +41,7 @@ const (
 	Move             // push side: atomic server MOVE from From→Path
 	MoveApply        // pull side: server already moved, apply locally (os.Rename)
 	SkipCaseConflict // terminal: file skipped due to case/unicode collision
+	DeleteRemoteDir  // single DELETE on a directory path; server cascades soft-delete to descendants
 )
 
 func (a SyncAction) String() string {
@@ -65,6 +66,8 @@ func (a SyncAction) String() string {
 		return "move-apply"
 	case SkipCaseConflict:
 		return "skip-case-conflict"
+	case DeleteRemoteDir:
+		return "delete-remote-dir"
 	default:
 		return "unknown"
 	}

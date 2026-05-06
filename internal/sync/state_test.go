@@ -271,6 +271,80 @@ func TestRecordFile(t *testing.T) {
 	}
 }
 
+func TestDeletePrefix(t *testing.T) {
+	dir := t.TempDir()
+	s, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.RecordFile("foo/a.txt", "h1", 1, "rev_1")
+	s.RecordFile("foo/b.txt", "h2", 2, "rev_2")
+	s.RecordFile("foo/bar/c.txt", "h3", 3, "rev_3")
+	s.RecordFile("foobar.txt", "h4", 4, "rev_4")
+	s.RecordFile("other/d.txt", "h5", 5, "rev_5")
+
+	n := s.DeletePrefix("foo/")
+	if n != 3 {
+		t.Errorf("DeletePrefix returned %d, want 3", n)
+	}
+
+	for _, p := range []string{"foo/a.txt", "foo/b.txt", "foo/bar/c.txt"} {
+		if _, ok := s.Files[p]; ok {
+			t.Errorf("%s should be deleted from Files", p)
+		}
+	}
+	for _, p := range []string{"foobar.txt", "other/d.txt"} {
+		if _, ok := s.Files[p]; !ok {
+			t.Errorf("%s should still be in Files", p)
+		}
+	}
+
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	s2, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+
+	for _, p := range []string{"foo/a.txt", "foo/b.txt", "foo/bar/c.txt"} {
+		if _, ok := s2.Files[p]; ok {
+			t.Errorf("%s should not survive reload", p)
+		}
+	}
+	for _, p := range []string{"foobar.txt", "other/d.txt"} {
+		if _, ok := s2.Files[p]; !ok {
+			t.Errorf("%s should survive reload", p)
+		}
+	}
+}
+
+func TestDeletePrefix_NoMatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := LoadState(dir, testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.RecordFile("foo/a.txt", "h1", 1, "rev_1")
+
+	n := s.DeletePrefix("missing/")
+	if n != 0 {
+		t.Errorf("DeletePrefix returned %d, want 0", n)
+	}
+	if _, ok := s.Files["foo/a.txt"]; !ok {
+		t.Error("foo/a.txt should still be present")
+	}
+}
+
 func TestPushedSeqs_Prune(t *testing.T) {
 	dir := t.TempDir()
 	s, err := LoadState(dir, testIdentity)

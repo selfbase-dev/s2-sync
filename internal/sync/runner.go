@@ -60,6 +60,7 @@ func RunInitialSync(c *client.Client, localDir string, state *State, opts SyncOp
 	plans := Compare(localFiles, remoteFiles, state.Files)
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
+	plans = MergeFolderDeletes(plans, localFiles, state.Files)
 
 	result, err := executePlans(plans, localDir, c, state, opts)
 	if err != nil {
@@ -142,6 +143,7 @@ func RunIncrementalSync(c *client.Client, localDir string, state *State, opts Sy
 	plans := MergePlansByPath(fileLevelPlans, subtreePlans, dirOutcome.ArchiveWalkPlans)
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
+	plans = MergeFolderDeletes(plans, localFiles, state.Files)
 
 	hasLocalChanges := HasLocalChanges(localFiles, state.Files)
 
@@ -222,14 +224,9 @@ func executePlans(plans []types.SyncPlan, localDir string, c *client.Client, sta
 		return nil, nil
 	}
 
-	// Max-delete safety check
+	deleteCount := countPlanDeletes(plans, state.Files)
+
 	if opts.MaxDeletePct > 0 {
-		deleteCount := 0
-		for _, p := range plans {
-			if p.Action == types.DeleteLocal || p.Action == types.DeleteRemote {
-				deleteCount++
-			}
-		}
 		totalTracked := len(state.Files)
 		if totalTracked > 0 && !opts.Force && deleteCount*100/totalTracked > opts.MaxDeletePct {
 			return nil, fmt.Errorf("safety: %d deletes out of %d tracked files (%d%%) exceeds --max-delete=%d%%. Use --force to override",
@@ -244,7 +241,7 @@ func executePlans(plans []types.SyncPlan, localDir string, c *client.Client, sta
 	opts.logger().Info(slog2.SyncPlan,
 		"push", counts[types.Push],
 		"pull", counts[types.Pull],
-		"delete", counts[types.DeleteLocal]+counts[types.DeleteRemote],
+		"delete", deleteCount,
 		"conflict", counts[types.Conflict],
 		"dry_run", opts.DryRun,
 	)
@@ -268,5 +265,22 @@ func executePlans(plans []types.SyncPlan, localDir string, c *client.Client, sta
 // (still used by tests / external callers).
 func executeWithLogger(plans []types.SyncPlan, localRoot string, c *client.Client, state *State, dryRun bool, logger *slog.Logger) (*ExecuteResult, error) {
 	return execute(plans, localRoot, c, state, dryRun, executeDeps{logger: logger})
+}
+
+// countPlanDeletes returns the effective number of files a plan list
+// will delete. A DeleteRemoteDir collapses N per-file deletes into one
+// plan entry; counting raw plans would let a 10k-file folder slip past
+// the --max-delete safety valve as if it were a single delete.
+func countPlanDeletes(plans []types.SyncPlan, archive map[string]types.FileState) int {
+	n := 0
+	for _, p := range plans {
+		switch p.Action {
+		case types.DeleteLocal, types.DeleteRemote:
+			n++
+		case types.DeleteRemoteDir:
+			n += countFilesUnderPrefix(archive, p.Path+"/")
+		}
+	}
+	return n
 }
 

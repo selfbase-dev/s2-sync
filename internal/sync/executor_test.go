@@ -247,6 +247,74 @@ func TestExecute_DeleteRemote(t *testing.T) {
 	}
 }
 
+func TestExecute_DeleteRemoteDir(t *testing.T) {
+	var gotMethod, gotPath string
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if r.Method == "DELETE" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"seq": 99})
+		}
+	})
+
+	localDir := t.TempDir()
+	state := testStateFromArchive(map[string]types.FileState{
+		"foo/a.txt":     {LocalHash: "h1"},
+		"foo/b.txt":     {LocalHash: "h2"},
+		"foo/bar/c.txt": {LocalHash: "h3"},
+		"sibling.txt":   {LocalHash: "hX"},
+	})
+	plans := []types.SyncPlan{{Path: "foo", Action: types.DeleteRemoteDir}}
+
+	result, _ := Execute(plans, localDir, c, state, false)
+	if result.Deleted != 3 {
+		t.Errorf("deleted = %d, want 3", result.Deleted)
+	}
+	if gotMethod != "DELETE" {
+		t.Errorf("method = %q, want DELETE", gotMethod)
+	}
+	if gotPath != "/api/v1/files/foo" {
+		t.Errorf("path = %q, want /api/v1/files/foo", gotPath)
+	}
+	for _, p := range []string{"foo/a.txt", "foo/b.txt", "foo/bar/c.txt"} {
+		if _, ok := state.Files[p]; ok {
+			t.Errorf("%s should be removed from archive", p)
+		}
+	}
+	if _, ok := state.Files["sibling.txt"]; !ok {
+		t.Error("sibling.txt must remain")
+	}
+	if !state.IsPushedSeq(99) {
+		t.Error("seq 99 should be in pushed_seqs")
+	}
+}
+
+func TestExecute_DeleteRemoteDir_DryRun(t *testing.T) {
+	called := false
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+
+	localDir := t.TempDir()
+	state := testStateFromArchive(map[string]types.FileState{
+		"foo/a.txt": {LocalHash: "h1"},
+	})
+	plans := []types.SyncPlan{{Path: "foo", Action: types.DeleteRemoteDir}}
+
+	result, _ := Execute(plans, localDir, c, state, true)
+	if called {
+		t.Error("dry-run must not call server")
+	}
+	if result.Deleted != 1 {
+		t.Errorf("deleted = %d, want 1 (dry-run still counts archive entries)", result.Deleted)
+	}
+	if _, ok := state.Files["foo/a.txt"]; !ok {
+		t.Error("dry-run must not mutate archive")
+	}
+}
+
 func TestExecute_Move_Success(t *testing.T) {
 	var gotURL, gotFrom, gotTo string
 	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {

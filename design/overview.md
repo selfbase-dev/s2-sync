@@ -34,6 +34,8 @@ Walk local → PollChanges(cursor) → expand dir_events → Compare (3-way)
 - **Compare**: 3-way merge → `[]SyncPlan{Path, Action, RevisionID, Hash}` (`compare.go`)
 - **Execute**: dispatch each plan as push / pull / conflict / delete (`executor*.go`). Plans are independent — one failure doesn't block the rest.
 
+A post-Compare pass (`MergeFolderDeletes`) collapses runs of `DeleteRemote` plans that drain a directory subtree into a single `DeleteRemoteDir` plan, so the server's recursive cascade soft-delete runs in one round-trip and the directory entity itself is removed.
+
 ## 3-way merge (the core)
 
 Diffing local vs remote alone can't tell you which side changed. We keep the last-synced state (the **archive**) as the comparison anchor.
