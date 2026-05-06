@@ -94,6 +94,7 @@ var allScenarios = []string{
 	"S19", "S21", "S22",
 	"S25",
 	"S31", "S32",
+	"S40",
 }
 
 var implementedScenarios = map[string]bool{}
@@ -300,6 +301,7 @@ func (e *testEnv) initialSync(state *State) *ExecuteResult {
 	plans := Compare(localFiles, remoteFiles, state.Files)
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
+	plans = MergeFolderDeletes(plans, localFiles, state.Files)
 	result, err := Execute(plans, e.localDir, e.client, state, false)
 	if err != nil {
 		e.t.Fatalf("Execute: %v", err)
@@ -384,6 +386,7 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	)
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
+	plans = MergeFolderDeletes(plans, localFiles, state.Files)
 
 	result, err := Execute(plans, e.localDir, e.client, state, false)
 	if err != nil {
@@ -1066,6 +1069,63 @@ func TestCase_RemoteCollision_Skipped(t *testing.T) {
 			t.Errorf("lower-case variant content = %q, want 'upper' (same-inode ok)", string(content))
 		}
 		_ = info
+	}
+}
+
+// remoteDirExists checks whether the given directory path exists on
+// the server. Returns true even when the directory is empty; returns
+// false only when the server has no live row for the path. Used to
+// verify cascade-delete (DeleteRemoteDir) tore down the directory
+// node, not just its file children.
+func (e *testEnv) remoteDirExists(relPath string) bool {
+	e.t.Helper()
+	if !strings.HasSuffix(relPath, "/") {
+		relPath += "/"
+	}
+	_, err := e.client.ListDir(relPath)
+	return err == nil
+}
+
+// TestS40_Incremental_LocalFolderDelete_CascadesOnServer covers
+// SELF-649: deleting a populated folder locally must remove the
+// folder entity itself on the server, not just the files inside it.
+// Previously s2-sync emitted N per-file DELETEs and left the empty
+// directory row behind.
+func TestS40_Incremental_LocalFolderDelete_CascadesOnServer(t *testing.T) {
+	markScenario("S40")
+	env := newTestEnv(t)
+	env.writeLocal("foo/a.txt", "alpha")
+	env.writeLocal("foo/b.txt", "beta")
+	env.writeLocal("foo/bar/c.txt", "gamma")
+	env.writeLocal("outside.txt", "untouched")
+	env.sync()
+
+	if !env.remoteDirExists("foo") {
+		t.Fatal("precondition: foo/ should exist on server after initial sync")
+	}
+
+	if err := os.RemoveAll(filepath.Join(env.localDir, "foo")); err != nil {
+		t.Fatalf("RemoveAll foo/: %v", err)
+	}
+
+	result := env.sync()
+	if result.Deleted < 3 {
+		t.Errorf("Deleted = %d, want >= 3 (cascade should report descendant count)", result.Deleted)
+	}
+
+	for _, p := range []string{"foo/a.txt", "foo/b.txt", "foo/bar/c.txt"} {
+		if env.remoteExists(p) {
+			t.Errorf("%s should be gone from server", p)
+		}
+	}
+	if env.remoteDirExists("foo") {
+		t.Error("foo/ directory entity should be removed (cascade soft-delete)")
+	}
+	if env.remoteDirExists("foo/bar") {
+		t.Error("foo/bar/ directory entity should be removed (cascade soft-delete)")
+	}
+	if !env.remoteExists("outside.txt") {
+		t.Error("outside.txt must remain (cascade should not over-delete)")
 	}
 }
 

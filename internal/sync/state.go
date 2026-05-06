@@ -310,6 +310,27 @@ func (s *State) DeleteFile(path string) {
 	s.dirty[path] = struct{}{}
 }
 
+// DeletePrefix drops every archive entry whose path begins with prefix.
+// Used by DeleteRemoteDir after a server-side cascade soft-delete to
+// reconcile the local archive in one shot. Returns the number of rows
+// removed so the caller can update counters / safety thresholds.
+func (s *State) DeletePrefix(prefix string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if prefix == "" {
+		return 0
+	}
+	n := 0
+	for path := range s.Files {
+		if strings.HasPrefix(path, prefix) {
+			delete(s.Files, path)
+			s.dirty[path] = struct{}{}
+			n++
+		}
+	}
+	return n
+}
+
 // MoveFile atomically renames an archive entry without losing the
 // row's version metadata. Used by the directory-move handler.
 func (s *State) MoveFile(oldPath, newPath string) {

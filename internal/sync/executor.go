@@ -137,6 +137,26 @@ func execute(
 			result.Deleted++
 			log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote")
 
+		case types.DeleteRemoteDir:
+			prefix := plan.Path + "/"
+			if dryRun {
+				n := countFilesUnderPrefix(state.Files, prefix)
+				log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote", "kind", "dir", "count", n, "dry_run", true)
+				result.Deleted += n
+				continue
+			}
+			delResult, err := c.Delete(remoteKey)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("delete remote dir %s: %w", plan.Path, err))
+				continue
+			}
+			if delResult != nil && delResult.Seq != nil {
+				state.AddPushedSeq(*delResult.Seq)
+			}
+			n := state.DeletePrefix(prefix)
+			result.Deleted += n
+			log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote", "kind", "dir", "count", n)
+
 		case types.Conflict:
 			if dryRun {
 				log.Info(slog2.FileConflict, "path", plan.Path, "dry_run", true)
