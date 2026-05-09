@@ -3,6 +3,7 @@ import {
   CancelOAuthLogin,
   EnsureFolder,
   PickFolder,
+  SignOut,
   StartOAuthLogin,
   StartSync,
 } from "../wailsjs/go/main/App";
@@ -12,9 +13,10 @@ interface Props {
   defaultFolder: string;
   initialFolder: string;
   onConnected: (folder: string) => void;
+  onSignedOut: () => void;
 }
 
-export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }: Props) {
+export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected, onSignedOut }: Props) {
   const [step, setStep] = useState<1 | 2>(1);
   const [folder, setFolder] = useState(initialFolder);
   const [error, setError] = useState("");
@@ -47,6 +49,11 @@ export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }:
 
   const cancelSignIn = async () => {
     await CancelOAuthLogin();
+  };
+
+  const signOut = async () => {
+    await SignOut();
+    onSignedOut();
   };
 
   const connect = async () => {
@@ -140,6 +147,14 @@ export function Welcome({ endpoint, defaultFolder, initialFolder, onConnected }:
             </button>
 
             {error && <div className="error-banner">{error}</div>}
+            <button
+              type="button"
+              className="link-btn signin-cancel"
+              onClick={signOut}
+              disabled={busy}
+            >
+              Sign out
+            </button>
             <p className="signin-endpoint">{endpoint}</p>
           </>
         )}

@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"embed"
+	"os"
+	"path/filepath"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	winopts "github.com/wailsapp/wails/v2/pkg/options/windows"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -47,6 +50,7 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
+		Windows: webviewOptions(),
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
 		OnStartup:        app.startup,
 		OnShutdown: func(ctx context.Context) {
@@ -65,5 +69,21 @@ func main() {
 	})
 	if err != nil {
 		println("wails error:", err.Error())
+	}
+}
+
+// webviewOptions returns Windows-specific options. On non-Windows builds
+// the winopts import is still resolved but the field is ignored at
+// runtime, so this compiles cross-platform.
+func webviewOptions() *winopts.Options {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return nil
+	}
+	return &winopts.Options{
+		// Keep all app data under one folder (%APPDATA%\s2sync\…) so
+		// users know exactly what to remove when resetting. The Wails
+		// default would create a separate %APPDATA%\s2sync.exe folder.
+		WebviewUserDataPath: filepath.Join(dir, "s2sync", "webview2"),
 	}
 }
