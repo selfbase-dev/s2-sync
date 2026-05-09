@@ -125,6 +125,12 @@ function App() {
           setSignedIn(true);
           setFolder(f);
         }}
+        onSignedOut={() => {
+          setSignedIn(false);
+          setFolder("");
+          setState({ status: "idle" });
+          setLogs([]);
+        }}
       />
     );
   }
