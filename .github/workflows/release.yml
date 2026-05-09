@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +12,10 @@ permissions:
 jobs:
   release-cli:
     name: Release CLI
+    # goreleaser needs a real tag to publish the GitHub Release. Skip on
+    # workflow_dispatch — dispatch is for verifying the GUI sign + notarize
+    # path without polluting GitHub Releases.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -29,6 +34,10 @@ jobs:
   release-gui:
     name: Release GUI (${{ matrix.name }})
     needs: release-cli
+    # Run after release-cli on tag push, and run unconditionally on
+    # workflow_dispatch (release-cli is skipped there). This lets dispatch
+    # exercise the macOS sign + notarize path without a tag.
+    if: ${{ always() && needs.release-cli.result != 'failure' && needs.release-cli.result != 'cancelled' }}
     strategy:
       fail-fast: false
       matrix:
@@ -193,6 +202,7 @@ jobs:
           ls -la "../../../$archive"
 
       - name: Upload to Release
+        if: github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -206,6 +216,7 @@ jobs:
   checksums:
     name: Aggregate checksums
     needs: release-gui
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Download all release assets
@@ -245,6 +256,7 @@ jobs:
   release-notes:
     name: Update release notes with downloads
     needs: checksums
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
