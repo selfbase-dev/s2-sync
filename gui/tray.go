@@ -48,8 +48,11 @@ func onTrayReady(app *App) {
 	// Fires on the main thread once NSStatusItem is ready. Must not
 	// block — build the menu and hand click handling to a goroutine,
 	// then return so the run loop keeps pumping.
+	// Windows tray draws the icon image, not the title text, so SetIcon
+	// is mandatory there. SetTitle is still set for the macOS menu bar.
+	systray.SetIcon(trayIcon)
 	systray.SetTitle("S2")
-	systray.SetTooltip("S2 Sync")
+	systray.SetTooltip("S2 Sync — idle")
 
 	mShow := systray.AddMenuItem("Show window", "Open the S2 Sync window")
 	mStatus := systray.AddMenuItem("Status: idle", "Current sync status")
@@ -114,24 +117,31 @@ func onTrayReady(app *App) {
 }
 
 func refreshTray(app *App, mStatus, mStart, mStop *systray.MenuItem) {
+	// SetTitle is what the macOS menu bar shows. On Windows the tray
+	// only renders the icon, so status is also pushed into the tooltip
+	// (visible on hover) and the disabled menu row.
 	switch app.svc.Status().Status {
 	case service.StatusRunning:
 		systray.SetTitle("S2 ●")
+		systray.SetTooltip("S2 Sync — running")
 		mStatus.SetTitle("Status: running")
 		mStart.Hide()
 		mStop.Show()
 	case service.StatusStopping:
 		systray.SetTitle("S2 …")
+		systray.SetTooltip("S2 Sync — stopping…")
 		mStatus.SetTitle("Status: stopping…")
 		mStart.Hide()
 		mStop.Show()
 	case service.StatusError:
 		systray.SetTitle("S2 ✕")
+		systray.SetTooltip("S2 Sync — error")
 		mStatus.SetTitle("Status: error")
 		mStart.Show()
 		mStop.Hide()
 	default:
 		systray.SetTitle("S2")
+		systray.SetTooltip("S2 Sync — idle")
 		mStatus.SetTitle("Status: idle")
 		mStart.Show()
 		mStop.Hide()
