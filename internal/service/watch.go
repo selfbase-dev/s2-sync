@@ -29,6 +29,12 @@ func (s *SyncService) run(ctx context.Context, c *client.Client, state *s2sync.S
 	syncOpts := s2sync.SyncOptions{Logger: s.logger}
 	cb := s2sync.WatchCallbacks{
 		SyncFn: func() error {
+			// Bracket every sync run so the tray / dashboard can show
+			// "syncing now" vs "up to date" while the service stays in
+			// the Running status. defer guarantees EndSync runs even
+			// when the inner call errors or panics.
+			s.BeginSync()
+			defer s.EndSync()
 			if state.Cursor == "" {
 				return s2sync.RunInitialSync(c, localDir, state, syncOpts)
 			}

@@ -33,7 +33,12 @@ type Mount struct {
 }
 
 type StateInfo struct {
-	Status   Status `json:"status"`
+	Status Status `json:"status"`
+	// Syncing reports whether a sync run is currently in flight. It is
+	// orthogonal to Status: a Running service is "up to date" when
+	// Syncing is false and "syncing now" when it is true. The flag is
+	// bracketed by BeginSync / EndSync around each sync run.
+	Syncing  bool   `json:"syncing"`
 	Mount    *Mount `json:"mount,omitempty"`
 	Error    string `json:"error,omitempty"`
 	LastSync string `json:"lastSync,omitempty"`
@@ -82,8 +87,30 @@ func (s *SyncService) setError(err error) {
 	s.mu.Lock()
 	s.state.Status = StatusError
 	s.state.Error = err.Error()
+	// A failing sync run must not leave the in-flight indicator on.
+	// EndSync's deferred call will follow, but we clear here too so
+	// observers see a consistent (Error, Syncing=false) snapshot
+	// regardless of which lock-release wins.
+	s.state.Syncing = false
 	s.mu.Unlock()
 	s.logger.Error(slog2.SyncError, "err", err.Error())
+}
+
+// BeginSync marks a sync run as in flight. Idempotent: calling it
+// while already syncing is a no-op.
+func (s *SyncService) BeginSync() {
+	s.mu.Lock()
+	s.state.Syncing = true
+	s.mu.Unlock()
+}
+
+// EndSync clears the in-flight indicator. Idempotent. Called via defer
+// from the WatchCallbacks SyncFn wrapper so it always runs regardless
+// of success or error.
+func (s *SyncService) EndSync() {
+	s.mu.Lock()
+	s.state.Syncing = false
+	s.mu.Unlock()
 }
 
 func (s *SyncService) markSynced() {
