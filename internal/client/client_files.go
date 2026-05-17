@@ -191,31 +191,6 @@ func (c *Client) Upload(path string, body io.Reader, contentType string, ifMatch
 	return &result, nil
 }
 
-// Mkdir creates a directory.
-func (c *Client) Mkdir(path string) error {
-	if !strings.HasSuffix(path, "/") {
-		path += "/"
-	}
-	req, err := http.NewRequestWithContext(c.reqContext(), "PUT", c.filesURL(path), nil)
-	if err != nil {
-		return err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("mkdir failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if err := checkStatus(resp); err != nil {
-		return err
-	}
-	if resp.StatusCode != 201 && resp.StatusCode != 200 {
-		return fmt.Errorf("mkdir failed with status %d: %s", resp.StatusCode, readErrorBody(resp))
-	}
-	return nil
-}
-
 // Delete deletes a file (soft delete to trash).
 func (c *Client) Delete(path string) (*types.DeleteResult, error) {
 	req, err := http.NewRequestWithContext(c.reqContext(), "DELETE", c.filesURL(path), nil)
