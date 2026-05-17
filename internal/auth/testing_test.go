@@ -1,3 +1,5 @@
+//go:build testseam
+
 package auth
 
 import (
