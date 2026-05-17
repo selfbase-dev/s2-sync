@@ -16,8 +16,8 @@ jobs:
           go-version-file: go.mod
       # Skip ./gui/... — it is a Wails-managed package whose //go:embed
       # all:frontend/dist only resolves after `wails build` runs the
-      # frontend build. The GUI is verified in its own build workflow
-      # (see ADR 0048). CLI, sync core, and desktop service layer all
-      # compile/test standalone.
+      # frontend build. The GUI is verified in its own build workflow.
+      # CLI, sync core, and desktop service layer all compile/test
+      # standalone.
       - run: go test ./cmd/... ./internal/...
       - run: go build -o /dev/null ./cmd/... ./internal/...
