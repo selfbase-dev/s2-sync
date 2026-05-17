@@ -81,10 +81,15 @@ func (a SyncAction) String() string {
 
 // SyncPlan represents the classified action for a single file path.
 // For Action=Move, Path is the destination and From is the source.
+//
+// Origin tags the upstream that produced the plan so logs can be traced
+// back to high-level events. Empty = ordinary file-level compare; the
+// dir-event expansion path sets "dir_event".
 type SyncPlan struct {
 	Path       string
 	From       string
 	Action     SyncAction
 	RevisionID string
 	Hash       string
+	Origin     string
 }

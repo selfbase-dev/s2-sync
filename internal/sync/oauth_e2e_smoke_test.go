@@ -1,3 +1,5 @@
+//go:build testseam
+
 package sync_test
 
 import (

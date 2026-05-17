@@ -374,7 +374,7 @@ func TestHandleIncrementalDirEvents_SubtreePutMaterializesEmptyDirs(t *testing.T
 	c := client.New(srv.URL, auth.NewStaticSource("s2_test"))
 
 	changes := []types.ChangeEntry{{Action: "put", IsDir: true, PathAfter: "/vacation"}}
-	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(nil), changes)
+	outcome, err := HandleIncrementalDirEvents(c, dir, testStateFromArchive(nil), changes, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestDirLifecycle_WebFolderDelete_CollapsesLocalShell(t *testing.T) {
 	c := client.New("http://invalid", auth.NewStaticSource("s2_test"))
 	outcome, err := HandleIncrementalDirEvents(c, dir, st, []types.ChangeEntry{
 		{Action: "delete", IsDir: true, PathBefore: "/Music"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

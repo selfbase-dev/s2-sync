@@ -2,10 +2,12 @@ package sync
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -13,10 +15,19 @@ import (
 // prefix to `to` prefix. Files whose local hash has drifted from the
 // archive are left in place as PreserveLocalRename conflicts. Archive
 // rows are moved via state so dirty tracking flushes them at Save.
+//
+// Every per-file rename emits a FileMove event tagged `kind=dir_event`
+// so operators can see what the high-level dir move expanded into. The
+// per-file events keep the same shape as case-only renames (executor's
+// MoveApply emits the same FileMove with side=local).
 func expandArchiveMove(
 	state *State,
+	log *slog.Logger,
 	localDir, fromPrefix, toPrefix string,
 ) ([]types.SyncPlan, bool, error) {
+	if log == nil {
+		log = slog.Default()
+	}
 	if fromPrefix == "" {
 		return nil, false, nil
 	}
@@ -66,6 +77,7 @@ func expandArchiveMove(
 			plans = append(plans, types.SyncPlan{
 				Path:   m.oldKey,
 				Action: types.PreserveLocalRename,
+				Origin: "dir_event",
 			})
 			continue
 		}
@@ -78,6 +90,13 @@ func expandArchiveMove(
 				return nil, mutated, fmt.Errorf("rename %s → %s: %w", m.oldKey, m.newKey, err)
 			}
 			mutated = true
+			log.Info(slog2.FileMove,
+				"from", m.oldKey,
+				"to", m.newKey,
+				"side", "local",
+				"kind", "dir_event",
+				"tracked", true,
+			)
 		}
 		state.MoveFile(m.oldKey, m.newKey)
 	}
@@ -106,6 +125,13 @@ func expandArchiveMove(
 			return nil, mutated, fmt.Errorf("rename untracked %s → %s: %w", path, newPath, err)
 		}
 		mutated = true
+		log.Info(slog2.FileMove,
+			"from", path,
+			"to", newPath,
+			"side", "local",
+			"kind", "dir_event",
+			"tracked", false,
+		)
 	}
 
 	return plans, mutated, nil

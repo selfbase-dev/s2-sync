@@ -2,12 +2,13 @@ package sync
 
 import (
 	"errors"
-	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -22,7 +23,11 @@ func downloadWithFallback(c *client.Client, revisionID, remoteKey, relPath strin
 	if revisionID != "" {
 		dl, err := c.DownloadRevision(revisionID)
 		if errors.Is(err, client.ErrNotFound) {
-			fmt.Printf("warning: revision %s pruned, falling back to path download: %s\n", revisionID, relPath)
+			slog.Default().Warn(slog2.FileSkip,
+				"path", relPath,
+				"revision_id", revisionID,
+				"reason", "revision_pruned_falling_back_to_path_download",
+			)
 			dl, err = c.Download(remoteKey)
 			return dl, "", err
 		}
@@ -41,7 +46,10 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 	if prev, ok := state.Files[relPath]; ok {
 		currentHash, err := hashFile(localPath)
 		if err == nil && currentHash != prev.LocalHash {
-			fmt.Printf("conflict (local changed during pull): %s\n", relPath)
+			slog.Default().Warn(slog2.FileConflict,
+				"path", relPath,
+				"reason", "local_changed_during_pull",
+			)
 			return errPullAborted
 		}
 		preHash = currentHash
@@ -78,7 +86,10 @@ func executePull(localPath, remoteKey, relPath, revisionID string, c *client.Cli
 		postHash, err := hashFile(localPath)
 		if err == nil && postHash != preHash {
 			os.Remove(tmpPath)
-			fmt.Printf("conflict (local changed during pull): %s\n", relPath)
+			slog.Default().Warn(slog2.FileConflict,
+				"path", relPath,
+				"reason", "local_changed_during_pull",
+			)
 			return errPullAborted
 		}
 	}
@@ -106,7 +117,10 @@ func skipIdempotentPull(plan types.SyncPlan, state *State) bool {
 	}
 
 	if plan.RevisionID != "" && prev.RevisionID != "" && prev.RevisionID == plan.RevisionID {
-		fmt.Printf("skipped (same revision): %s\n", plan.Path)
+		slog.Default().Info(slog2.FileSkip,
+			"path", plan.Path,
+			"reason", "same_revision",
+		)
 		return true
 	}
 

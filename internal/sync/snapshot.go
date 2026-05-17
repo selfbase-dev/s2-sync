@@ -1,11 +1,12 @@
 package sync
 
 import (
-	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -28,7 +29,11 @@ func SnapshotToRemoteFiles(items []types.SnapshotItem) map[string]types.RemoteFi
 		}
 		key := strings.TrimPrefix(it.Path, "/")
 		if !isSafeRelativePath(key) {
-			fmt.Printf("warning: skipping unsafe snapshot path: %s\n", it.Path)
+			slog.Default().Warn(slog2.SyncWarn,
+				"reason", "unsafe_path_skipped",
+				"source", "snapshot",
+				"path", it.Path,
+			)
 			continue
 		}
 		size := int64(0)
@@ -78,7 +83,11 @@ func SnapshotToRemoteDirs(items []types.SnapshotItem) []string {
 			continue
 		}
 		if !isSafeRelativePath(key) {
-			fmt.Printf("warning: skipping unsafe snapshot dir path: %s\n", it.Path)
+			slog.Default().Warn(slog2.SyncWarn,
+				"reason", "unsafe_path_skipped",
+				"source", "snapshot_dir",
+				"path", it.Path,
+			)
 			continue
 		}
 		out = append(out, key)

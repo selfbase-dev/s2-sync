@@ -43,7 +43,7 @@ func expandArchiveDelete(
 			action = types.PreserveLocalRename
 			hasPreserve = true
 		}
-		plans = append(plans, types.SyncPlan{Path: path, Action: action})
+		plans = append(plans, types.SyncPlan{Path: path, Action: action, Origin: "dir_event"})
 	}
 
 	fsPaths, err := walkLocalUnderPrefix(localDir, prefix)
@@ -57,6 +57,7 @@ func expandArchiveDelete(
 		plans = append(plans, types.SyncPlan{
 			Path:   path,
 			Action: types.PreserveLocalRename,
+			Origin: "dir_event",
 		})
 		hasPreserve = true
 	}
@@ -74,6 +75,7 @@ func expandArchiveDelete(
 		plans = append(plans, types.SyncPlan{
 			Path:   strings.TrimSuffix(prefix, "/"),
 			Action: types.RmdirLocal,
+			Origin: "dir_event",
 		})
 	}
 	return plans, nil

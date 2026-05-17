@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 )
 
 // executeConflict handles conflict by keeping local and saving remote as
@@ -22,7 +24,10 @@ func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string
 	dl, downloadedRevisionID, err := downloadWithFallback(c, revisionID, remoteKey, relPath)
 	if err != nil {
 		if errors.Is(err, client.ErrNotFound) {
-			fmt.Printf("conflict (remote deleted, pushing local): %s\n", relPath)
+			slog.Default().Warn(slog2.FileConflict,
+				"path", relPath,
+				"reason", "remote_deleted_pushing_local",
+			)
 			return conflictPushLocal(localPath, remoteKey, relPath, c, state)
 		}
 		return fmt.Errorf("download remote for conflict: %w", err)
@@ -60,7 +65,10 @@ func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string
 	if localHash != "" && localHash == remoteHash {
 		os.Remove(tmpPath)
 		state.RecordFile(relPath, localHash, dl.ContentVersion, downloadedRevisionID)
-		fmt.Printf("verified: %s (identical)\n", relPath)
+		slog.Default().Info(slog2.FileConflict,
+			"path", relPath,
+			"reason", "verified_identical",
+		)
 		return nil
 	}
 
@@ -72,7 +80,11 @@ func executeConflict(localPath, remoteKey, relPath, revisionID, localRoot string
 
 	conflictRel, _ := filepath.Rel(localRoot, conflictPath)
 	conflictRel = filepath.ToSlash(conflictRel)
-	fmt.Printf("conflict: %s (remote saved as %s)\n", relPath, conflictRel)
+	slog.Default().Warn(slog2.FileConflict,
+		"path", relPath,
+		"reason", "remote_saved_as_conflict_copy",
+		"conflict_copy", conflictRel,
+	)
 
 	return conflictPushLocal(localPath, remoteKey, relPath, c, state)
 }
@@ -81,7 +93,10 @@ func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, s
 	lf, err := os.Open(localPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("conflict (local deleted, remote saved): %s\n", relPath)
+			slog.Default().Warn(slog2.FileConflict,
+				"path", relPath,
+				"reason", "local_deleted_remote_saved",
+			)
 			state.DeleteFile(relPath)
 			return nil
 		}
@@ -109,12 +124,21 @@ func conflictPushLocal(localPath, remoteKey, relPath string, c *client.Client, s
 }
 
 // executePreserveLocalRename renames the local file to a .sync-conflict-*
-// copy and drops its archive entry.
-func executePreserveLocalRename(localPath, relPath string, state *State) error {
+// copy and drops its archive entry. log carries the executor's per-plan
+// origin attrs (e.g. kind=dir_event) so the conflict event is traceable
+// back to the upstream dir change.
+func executePreserveLocalRename(log *slog.Logger, localPath, relPath string, state *State) error {
+	if log == nil {
+		log = slog.Default()
+	}
 	if _, err := os.Stat(localPath); err != nil {
 		if os.IsNotExist(err) {
 			state.DeleteFile(relPath)
-			fmt.Printf("preserved (already gone): %s\n", relPath)
+			log.Info(slog2.FileConflict,
+				"path", relPath,
+				"detail", "preserve_local_rename",
+				"reason", "already_gone",
+			)
 			return nil
 		}
 		return err
@@ -124,7 +148,11 @@ func executePreserveLocalRename(localPath, relPath string, state *State) error {
 		return err
 	}
 	state.DeleteFile(relPath)
-	fmt.Printf("preserved local as %s: %s\n", filepath.Base(conflictPath), relPath)
+	log.Info(slog2.FileConflict,
+		"path", relPath,
+		"detail", "preserve_local_rename",
+		"conflict_copy", filepath.Base(conflictPath),
+	)
 	return nil
 }
 

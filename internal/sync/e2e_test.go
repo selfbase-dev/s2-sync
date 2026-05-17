@@ -361,7 +361,7 @@ func (e *testEnv) incrementalSync(state *State) *ExecuteResult {
 	}
 
 	dirOutcome, err := HandleIncrementalDirEvents(
-		e.client, e.localDir, state, dirChanges,
+		e.client, e.localDir, state, dirChanges, nil,
 	)
 	if err != nil {
 		e.t.Fatalf("HandleIncrementalDirEvents: %v", err)
