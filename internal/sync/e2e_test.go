@@ -95,6 +95,7 @@ var allScenarios = []string{
 	"S25",
 	"S31", "S32",
 	"S40",
+	"S41", "S42",
 }
 
 var implementedScenarios = map[string]bool{}
@@ -1126,6 +1127,72 @@ func TestS40_Incremental_LocalFolderDelete_CascadesOnServer(t *testing.T) {
 	}
 	if !env.remoteExists("outside.txt") {
 		t.Error("outside.txt must remain (cascade should not over-delete)")
+	}
+}
+
+// TestS41_RemoteFolderDelete_RemovesLocalShell covers the pull side
+// of the directory lifecycle: a remote folder delete (web UI button)
+// must collapse the local shell along with the files inside it. The
+// fail-safe path is exercised by S42.
+func TestS41_RemoteFolderDelete_RemovesLocalShell(t *testing.T) {
+	markScenario("S41")
+	env := newTestEnv(t)
+	env.skipSelfFilter = true
+	env.writeLocal("Music/track.mp3", "bytes")
+	env.writeLocal("Music/album/song.mp3", "more")
+	env.sync()
+
+	if !env.remoteDirExists("Music") {
+		t.Fatal("precondition: Music/ should exist on the server")
+	}
+
+	// Remote folder delete (recursive — equivalent to a web UI
+	// "delete folder" click).
+	if _, err := env.client.Delete("Music/"); err != nil {
+		t.Fatalf("remote delete Music/: %v", err)
+	}
+
+	env.sync()
+
+	if env.localExists("Music/track.mp3") {
+		t.Error("Music/track.mp3 should be gone")
+	}
+	if env.localExists("Music") {
+		t.Error("Music/ shell should be removed after remote folder delete")
+	}
+}
+
+// TestS42_RemoteFolderDelete_PreservesShellWithUntracked covers the
+// fail-safe: an untracked descendant (typical .DS_Store) keeps the
+// local shell intact so the user notices "something is there" before
+// it vanishes.
+func TestS42_RemoteFolderDelete_PreservesShellWithUntracked(t *testing.T) {
+	markScenario("S42")
+	env := newTestEnv(t)
+	env.skipSelfFilter = true
+	env.writeLocal("Photos/cat.jpg", "img")
+	env.sync()
+
+	// User dropped a .DS_Store after the initial sync; the file is
+	// not in the archive.
+	if err := os.WriteFile(filepath.Join(env.localDir, "Photos", ".DS_Store"), []byte("ds"), 0644); err != nil {
+		t.Fatalf("write .DS_Store: %v", err)
+	}
+
+	if _, err := env.client.Delete("Photos/"); err != nil {
+		t.Fatalf("remote delete Photos/: %v", err)
+	}
+
+	env.sync()
+
+	if env.localExists("Photos/cat.jpg") {
+		t.Error("Photos/cat.jpg should be deleted alongside the remote delete")
+	}
+	if !env.localExists("Photos") {
+		t.Error("Photos/ shell should survive when an untracked .DS_Store remained")
+	}
+	if !env.localExists("Photos/.DS_Store") {
+		t.Error(".DS_Store must not be touched by the rmdir post-action")
 	}
 }
 

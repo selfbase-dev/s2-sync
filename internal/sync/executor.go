@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
 	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
@@ -26,6 +27,70 @@ type SkippedEvent struct {
 	Path       string
 	RevisionID string
 	Reason     string // "revision_and_path_404" | "path_404"
+}
+
+// reorderRmdirsLast returns a permutation of plans where every
+// RmdirLocal entry has been moved to the end of the slice and sorted
+// by path length descending (deepest first). The non-rmdir prefix
+// keeps its incoming order, so callers that rely on
+// MergePlansByPath's deterministic sort still see file-level plans in
+// the same sequence.
+func reorderRmdirsLast(plans []types.SyncPlan) []types.SyncPlan {
+	if len(plans) == 0 {
+		return plans
+	}
+	head := make([]types.SyncPlan, 0, len(plans))
+	var rmdirs []types.SyncPlan
+	for _, p := range plans {
+		if p.Action == types.RmdirLocal {
+			rmdirs = append(rmdirs, p)
+		} else {
+			head = append(head, p)
+		}
+	}
+	if len(rmdirs) == 0 {
+		return plans
+	}
+	// Deepest first so child rmdir runs before its parent.
+	sortRmdirsDeepestFirst(rmdirs)
+	return append(head, rmdirs...)
+}
+
+func sortRmdirsDeepestFirst(plans []types.SyncPlan) {
+	// In-place insertion sort by path-segment count descending. Stable
+	// over equal depths preserves incoming order, which is sorted by
+	// path so deterministic.
+	count := func(p string) int { return strings.Count(p, "/") }
+	for i := 1; i < len(plans); i++ {
+		for j := i; j > 0 && count(plans[j].Path) > count(plans[j-1].Path); j-- {
+			plans[j], plans[j-1] = plans[j-1], plans[j]
+		}
+	}
+}
+
+// skipRmdirOnFoldCollision reports whether a RmdirLocal post-action
+// should be suppressed because the local filesystem is case-insensitive
+// AND a live archive entry under a fold-equivalent (but exact-different)
+// directory sits on the same inode. Removing the shell would silently
+// delete the live sibling's directory on Mac/Windows.
+//
+// On case-sensitive filesystems the directory paths are distinct inodes
+// so the check is a no-op.
+func skipRmdirOnFoldCollision(rmdirPath, localRoot string, archive map[string]types.FileState) bool {
+	if !IsCaseInsensitiveFS(localRoot) {
+		return false
+	}
+	foldedPrefix := FoldKey(rmdirPath) + "/"
+	exactPrefix := rmdirPath + "/"
+	for live := range archive {
+		if !strings.HasPrefix(FoldKey(live), foldedPrefix) {
+			continue
+		}
+		if !strings.HasPrefix(live, exactPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Key returns the persistent dedup key used to detect degenerate loops
@@ -70,6 +135,16 @@ func (d executeDeps) log() *slog.Logger {
 	return slog.Default()
 }
 
+// Execute is the public entry point used by E2E tests. Production
+// callers go through the runner (RunInitialSync / RunIncrementalSync)
+// which threads SyncOptions, the structured logger, and the
+// max-delete safety check around `execute`. Keeping Execute as a
+// thin wrapper preserves the existing test surface without exposing
+// the dependency seam.
+func Execute(plans []types.SyncPlan, localRoot string, c *client.Client, state *State, dryRun bool) (*ExecuteResult, error) {
+	return execute(plans, localRoot, c, state, dryRun, executeDeps{})
+}
+
 // execute applies the sync plans against local filesystem and remote storage.
 //
 // All plan paths are relative to the token's base_path (which the server
@@ -85,7 +160,14 @@ func execute(
 	result := &ExecuteResult{}
 	log := deps.log()
 
-	for _, plan := range plans {
+	// RmdirLocal must run AFTER all the per-file DeleteLocal plans for
+	// its prefix have been attempted, otherwise os.Remove always fails
+	// with ENOTEMPTY. Deferring them to a second pass also lets the
+	// rmdir for `a/b/` run before `a/` (deepest first), so nested
+	// shells collapse correctly.
+	ordered := reorderRmdirsLast(plans)
+
+	for _, plan := range ordered {
 		localPath, err := safeJoin(localRoot, plan.Path)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("unsafe plan path %s: %w", plan.Path, err))
@@ -288,6 +370,50 @@ func execute(
 			state.MoveFile(plan.From, plan.Path)
 			result.Moved++
 			log.Info(slog2.FileMove, "from", plan.From, "to", plan.Path, "side", "local")
+
+		case types.MkdirLocal:
+			if dryRun {
+				log.Info(slog2.FilePull, "path", plan.Path, "kind", "dir", "dry_run", true)
+				continue
+			}
+			if err := os.MkdirAll(localPath, 0755); err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("mkdir local %s: %w", plan.Path, err))
+				continue
+			}
+			log.Info(slog2.FilePull, "path", plan.Path, "kind", "dir")
+
+		case types.RmdirLocal:
+			// Non-recursive rmdir post-action emitted by
+			// expandArchiveDelete. The dry-run branch short-circuits
+			// before any per-file delete runs, so do the same here.
+			//
+			// Failure modes that are normal and silent:
+			//   - directory non-empty (untracked file like .DS_Store, or
+			//     a sibling delete that turned into PreserveLocalRename
+			//     after a different folder's expansion ran)
+			//   - directory absent (already removed by a parent prefix
+			//     rmdir earlier in the plan list)
+			//   - case-insensitive FS holds a live fold-equivalent
+			//     directory that we must not touch
+			if dryRun {
+				log.Info(slog2.FileDelete, "path", plan.Path, "kind", "dir", "side", "local", "dry_run", true)
+				continue
+			}
+			if skipRmdirOnFoldCollision(plan.Path, localRoot, state.Files) {
+				log.Info(slog2.FileSkip, "path", plan.Path, "kind", "dir", "reason", "case_fold_live_sibling")
+				continue
+			}
+			if err := os.Remove(localPath); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				// ENOTEMPTY / EEXIST are expected: an untracked file or
+				// a sibling that drifted is still on disk. Log at info
+				// so it's visible without alarming.
+				log.Info(slog2.FileSkip, "path", plan.Path, "kind", "dir", "reason", "rmdir_non_empty", "err", err.Error())
+				continue
+			}
+			log.Info(slog2.FileDelete, "path", plan.Path, "kind", "dir", "side", "local")
 
 		case types.SkipCaseConflict:
 			// terminal state — do not touch local or remote.

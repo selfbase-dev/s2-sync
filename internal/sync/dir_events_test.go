@@ -53,11 +53,25 @@ func TestExpandArchiveDelete_UnchangedLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 {
-		t.Fatalf("got %d plans, want 1", len(plans))
+	// One DeleteLocal for the tracked file + one RmdirLocal post-action
+	// (clean delete, no PreserveLocalRename → safe to attempt rmdir).
+	if len(plans) != 2 {
+		t.Fatalf("got %d plans, want 2 (DeleteLocal + RmdirLocal)", len(plans))
 	}
-	if plans[0].Path != "docs/a.txt" || plans[0].Action != types.DeleteLocal {
-		t.Errorf("plan = %+v", plans[0])
+	var delPlan, rmdirPlan types.SyncPlan
+	for _, p := range plans {
+		switch p.Action {
+		case types.DeleteLocal:
+			delPlan = p
+		case types.RmdirLocal:
+			rmdirPlan = p
+		}
+	}
+	if delPlan.Path != "docs/a.txt" {
+		t.Errorf("delete plan = %+v", delPlan)
+	}
+	if rmdirPlan.Path != "docs" {
+		t.Errorf("rmdir plan path = %q, want %q", rmdirPlan.Path, "docs")
 	}
 }
 
@@ -112,11 +126,24 @@ func TestExpandArchiveDelete_SimilarPrefixNotConfused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 {
-		t.Fatalf("got %d plans, want 1 (photosExtra must not match)", len(plans))
+	// One DeleteLocal for photos/a.jpg + one RmdirLocal for photos.
+	// photosExtra/* must NOT appear in either.
+	if len(plans) != 2 {
+		t.Fatalf("got %d plans, want 2 (DeleteLocal + RmdirLocal; photosExtra must not match)", len(plans))
 	}
-	if plans[0].Path != "photos/a.jpg" {
-		t.Errorf("plan path = %q", plans[0].Path)
+	for _, p := range plans {
+		switch p.Action {
+		case types.DeleteLocal:
+			if p.Path != "photos/a.jpg" {
+				t.Errorf("delete plan path = %q", p.Path)
+			}
+		case types.RmdirLocal:
+			if p.Path != "photos" {
+				t.Errorf("rmdir plan path = %q", p.Path)
+			}
+		default:
+			t.Errorf("unexpected plan %+v", p)
+		}
 	}
 }
 

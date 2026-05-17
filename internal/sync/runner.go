@@ -43,7 +43,7 @@ func RunInitialSync(c *client.Client, localDir string, state *State, opts SyncOp
 	}
 	localFiles := walkResult.Files
 
-	remoteFiles, snapshotCursor, err := Bootstrap(c)
+	remoteFiles, remoteDirs, snapshotCursor, err := BootstrapWithDirs(c)
 	if err != nil {
 		return fmt.Errorf("bootstrap failed: %w", err)
 	}
@@ -54,10 +54,12 @@ func RunInitialSync(c *client.Client, localDir string, state *State, opts SyncOp
 	opts.logger().Info(slog2.SyncStart,
 		"local_files", len(localFiles),
 		"remote_files", len(remoteFiles),
+		"remote_dirs", len(remoteDirs),
 		"already_in_sync", prefilled,
 	)
 
 	plans := Compare(localFiles, remoteFiles, state.Files)
+	plans = append(plans, MaterializeDirPlans(remoteDirs, remoteFiles, localDir)...)
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
 	plans = MergeFolderDeletes(plans, localFiles, state.Files)
@@ -145,7 +147,7 @@ func RunIncrementalSync(c *client.Client, localDir string, state *State, opts Sy
 	}
 	reportCollisions(collectCollisions(walkResult.Collisions, allRemoteCollisions), state, opts)
 
-	subtreePlans := dirOutcome.SubtreeComparePlans(localFiles, state.Files)
+	subtreePlans := dirOutcome.SubtreeComparePlansForLocalRoot(localFiles, state.Files, localDir)
 	fileLevelPlans := CompareIncremental(localFiles, state.Files, fileChanges)
 	plans := MergePlansByPath(fileLevelPlans, subtreePlans, dirOutcome.ArchiveWalkPlans)
 	plans = MergeCaseOnlyRenames(plans, localFiles, state.Files)

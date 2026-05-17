@@ -13,10 +13,15 @@ import (
 )
 
 // SubtreeSnapshot carries a remote file map that the caller must
-// Compare() AFTER re-walking the local tree.
+// Compare() AFTER re-walking the local tree. RemoteDirs lists the
+// live directory rows under the subtree so the executor can
+// materialize empty folders the user created on the web UI; the file
+// pipeline alone wouldn't see them (no file payload to ride into
+// existence on).
 type SubtreeSnapshot struct {
-	Prefix string
-	Remote map[string]types.RemoteFile
+	Prefix     string
+	Remote     map[string]types.RemoteFile
+	RemoteDirs []string
 }
 
 // DirEventOutcome carries the results of hybrid-strategy processing.
@@ -100,20 +105,21 @@ func HandleIncrementalDirEvents(
 				outcome.ArchiveWalkPlans = nil
 				outcome.SubtreeSnapshots = nil
 
-				remote, cursor, err := Bootstrap(c)
+				remote, remoteDirs, cursor, err := BootstrapWithDirs(c)
 				if err != nil {
 					return nil, fmt.Errorf("bootstrap (scope-root put): %w", err)
 				}
 				outcome.SubtreeSnapshots = append(outcome.SubtreeSnapshots, SubtreeSnapshot{
-					Prefix: "",
-					Remote: remote,
+					Prefix:     "",
+					Remote:     remote,
+					RemoteDirs: remoteDirs,
 				})
 				outcome.NewPrimaryCursor = cursor
 			} else {
 				if _, err := safeRelPrefix(ch.PathAfter); err != nil {
 					return nil, fmt.Errorf("put %s: %w", ch.PathAfter, err)
 				}
-				remote, err := FetchRemoteMap(c, ch.PathAfter)
+				remote, remoteDirs, err := FetchRemoteMapWithDirs(c, ch.PathAfter)
 				if err != nil {
 					if errors.Is(err, client.ErrNotFound) {
 						continue
@@ -122,8 +128,9 @@ func HandleIncrementalDirEvents(
 				}
 				prefix, _ := safeRelPrefix(ch.PathAfter)
 				outcome.SubtreeSnapshots = append(outcome.SubtreeSnapshots, SubtreeSnapshot{
-					Prefix: prefix,
-					Remote: remote,
+					Prefix:     prefix,
+					Remote:     remote,
+					RemoteDirs: remoteDirs,
 				})
 			}
 		}
@@ -131,16 +138,88 @@ func HandleIncrementalDirEvents(
 	return outcome, nil
 }
 
-// SubtreeComparePlans runs Compare() against each snapshot in the outcome.
+// SubtreeComparePlans runs Compare() against each snapshot in the
+// outcome and appends MkdirLocal plans for any live dir rows that
+// don't already exist locally. Dir materialization is plan-emitted
+// (rather than done eagerly) so it flows through the same dry-run /
+// max-delete safety net as file-level plans.
 func (o *DirEventOutcome) SubtreeComparePlans(
 	localFiles map[string]types.LocalFile,
 	archive map[string]types.FileState,
+) []types.SyncPlan {
+	return o.subtreeComparePlansForRoot(localFiles, archive, "")
+}
+
+// SubtreeComparePlansForLocalRoot is the local-root-aware variant of
+// SubtreeComparePlans. It needs the path so MkdirLocal emission can
+// stat the local FS and skip dirs that already exist (avoiding a
+// noisy redundant plan when the dir is materialised by an earlier
+// file pull's MkdirAll).
+func (o *DirEventOutcome) SubtreeComparePlansForLocalRoot(
+	localFiles map[string]types.LocalFile,
+	archive map[string]types.FileState,
+	localRoot string,
+) []types.SyncPlan {
+	return o.subtreeComparePlansForRoot(localFiles, archive, localRoot)
+}
+
+func (o *DirEventOutcome) subtreeComparePlansForRoot(
+	localFiles map[string]types.LocalFile,
+	archive map[string]types.FileState,
+	localRoot string,
 ) []types.SyncPlan {
 	var plans []types.SyncPlan
 	for _, snap := range o.SubtreeSnapshots {
 		localSub := filterByPrefix(localFiles, snap.Prefix)
 		archiveSub := filterByPrefix(archive, snap.Prefix)
 		plans = append(plans, Compare(localSub, snap.Remote, archiveSub)...)
+		plans = append(plans, MaterializeDirPlans(snap.RemoteDirs, snap.Remote, localRoot)...)
+	}
+	return plans
+}
+
+// MaterializeDirPlans returns MkdirLocal plans for every directory in
+// `remoteDirs` that is NOT the implicit parent of an already-pending
+// file pull (those parents will be created by os.MkdirAll inside the
+// pull executor). When localRoot is non-empty it is also used to skip
+// directories that already exist on disk — purely a noise reduction;
+// the executor's MkdirAll is idempotent so the duplicate plan is
+// harmless if localRoot is unknown.
+func MaterializeDirPlans(remoteDirs []string, remoteFiles map[string]types.RemoteFile, localRoot string) []types.SyncPlan {
+	if len(remoteDirs) == 0 {
+		return nil
+	}
+	// Pre-compute the set of directory paths that some pending file
+	// will implicitly create via os.MkdirAll. We don't actually have
+	// the plan list here (would create a cycle); we approximate it by
+	// taking the parent dirs of every file in the remote map.
+	implicit := make(map[string]struct{}, len(remoteFiles))
+	for f := range remoteFiles {
+		parent := f
+		for {
+			idx := strings.LastIndex(parent, "/")
+			if idx <= 0 {
+				break
+			}
+			parent = parent[:idx]
+			implicit[parent] = struct{}{}
+		}
+	}
+	plans := make([]types.SyncPlan, 0, len(remoteDirs))
+	for _, d := range remoteDirs {
+		if _, covered := implicit[d]; covered {
+			continue
+		}
+		if localRoot != "" {
+			abs, err := safeJoin(localRoot, d)
+			if err != nil {
+				continue
+			}
+			if info, err := os.Stat(abs); err == nil && info.IsDir() {
+				continue
+			}
+		}
+		plans = append(plans, types.SyncPlan{Path: d, Action: types.MkdirLocal})
 	}
 	return plans
 }

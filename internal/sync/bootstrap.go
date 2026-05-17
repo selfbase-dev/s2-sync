@@ -15,6 +15,7 @@ package sync
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
@@ -27,29 +28,47 @@ const maxReplayIterations = 20
 // It tries Snapshot first; on 413 (subtree cap exceeded), it falls back to
 // ListDir and recursively fetches each subdirectory.
 func FetchRemoteMap(c *client.Client, path string) (map[string]types.RemoteFile, error) {
-	remoteFiles, _, err := FetchSnapshotAsRemoteFiles(c, path)
-	if err == nil {
-		return remoteFiles, nil
-	}
-	if err != client.ErrSubtreeCapExceeded {
-		return nil, err
-	}
-
-	fmt.Printf("Subtree too large for atomic snapshot, splitting: %s\n", pathOrRoot(path))
-	return fetchRemoteMapViaListDir(c, path)
+	files, _, err := FetchRemoteMapWithDirs(c, path)
+	return files, err
 }
 
-func fetchRemoteMapViaListDir(c *client.Client, path string) (map[string]types.RemoteFile, error) {
+// FetchRemoteMapWithDirs is the wider sibling of FetchRemoteMap: it
+// returns both the file map and the set of live directory paths under
+// `path`. Used by the dir-lifecycle pipeline so empty folders the user
+// created on the web UI get materialized locally even when no file
+// pull would otherwise create them.
+//
+// The dir list is sorted and stripped of trailing slashes; empty path
+// ("" = scope root) is filtered out — the local mount point is not
+// re-created by sync.
+func FetchRemoteMapWithDirs(c *client.Client, path string) (map[string]types.RemoteFile, []string, error) {
+	files, dirs, _, err := fetchSnapshotSplit(c, path)
+	if err == nil {
+		return files, dirs, nil
+	}
+	if err != client.ErrSubtreeCapExceeded {
+		return nil, nil, err
+	}
+	fmt.Printf("Subtree too large for atomic snapshot, splitting: %s\n", pathOrRoot(path))
+	return fetchRemoteMapWithDirsViaListDir(c, path)
+}
+
+func fetchSnapshotSplit(c *client.Client, path string) (map[string]types.RemoteFile, []string, string, error) {
+	return FetchSnapshotSplit(c, path)
+}
+
+func fetchRemoteMapWithDirsViaListDir(c *client.Client, path string) (map[string]types.RemoteFile, []string, error) {
 	apiPath := path
 	if apiPath == "" {
 		apiPath = "/"
 	}
 	resp, err := c.ListDir(apiPath)
 	if err != nil {
-		return nil, fmt.Errorf("listdir %s: %w", apiPath, err)
+		return nil, nil, fmt.Errorf("listdir %s: %w", apiPath, err)
 	}
 
 	remoteFiles := make(map[string]types.RemoteFile)
+	var remoteDirs []string
 	prefix := strings.TrimPrefix(path, "/")
 	for _, item := range resp.Items {
 		var fullPath string
@@ -65,21 +84,24 @@ func fetchRemoteMapViaListDir(c *client.Client, path string) (map[string]types.R
 		}
 
 		if item.Type == "directory" {
-			subFiles, err := FetchRemoteMap(c, "/"+fullPath)
+			remoteDirs = append(remoteDirs, fullPath)
+			subFiles, subDirs, err := FetchRemoteMapWithDirs(c, "/"+fullPath)
 			if err != nil {
 				if errors.Is(err, client.ErrNotFound) {
 					continue
 				}
-				return nil, err
+				return nil, nil, err
 			}
 			for k, v := range subFiles {
 				remoteFiles[k] = v
 			}
+			remoteDirs = append(remoteDirs, subDirs...)
 		} else {
 			remoteFiles[fullPath] = remoteFileFromListItem(item)
 		}
 	}
-	return remoteFiles, nil
+	sort.Strings(remoteDirs)
+	return remoteFiles, remoteDirs, nil
 }
 
 func remoteFileFromListItem(item types.FileItem) types.RemoteFile {
@@ -123,27 +145,55 @@ func remoteFileFromChangeEntry(ch types.ChangeEntry, path string) types.RemoteFi
 // replay to correct for changes during fetch, and returns the final
 // remote map + cursor.
 func Bootstrap(c *client.Client) (map[string]types.RemoteFile, string, error) {
+	files, _, cursor, err := BootstrapWithDirs(c)
+	return files, cursor, err
+}
+
+// BootstrapWithDirs is Bootstrap plus the live directory list. Callers
+// that drive the dir-lifecycle pipeline (materialize empty folders +
+// rmdir shells) take this path; older callers stay on Bootstrap.
+//
+// The dir list is the post-replay set: directories deleted during the
+// replay window are dropped, ones created during it are added.
+func BootstrapWithDirs(c *client.Client) (map[string]types.RemoteFile, []string, string, error) {
 	s0, err := c.LatestCursor()
 	if err != nil {
-		return nil, "", fmt.Errorf("pin cursor: %w", err)
+		return nil, nil, "", fmt.Errorf("pin cursor: %w", err)
 	}
 
-	remoteFiles, err := FetchRemoteMap(c, "")
+	remoteFiles, remoteDirs, err := FetchRemoteMapWithDirs(c, "")
 	if err != nil {
-		return nil, "", fmt.Errorf("fetch remote map: %w", err)
+		return nil, nil, "", fmt.Errorf("fetch remote map: %w", err)
 	}
 
-	cursor, err := replayUntilConverged(c, s0, remoteFiles)
+	dirSet := make(map[string]struct{}, len(remoteDirs))
+	for _, d := range remoteDirs {
+		dirSet[d] = struct{}{}
+	}
+	cursor, err := replayUntilConvergedWithDirs(c, s0, remoteFiles, dirSet)
 	if err != nil {
-		return nil, "", fmt.Errorf("delta replay: %w", err)
+		return nil, nil, "", fmt.Errorf("delta replay: %w", err)
 	}
 
-	return remoteFiles, cursor, nil
+	out := make([]string, 0, len(dirSet))
+	for d := range dirSet {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return remoteFiles, out, cursor, nil
 }
 
 // replayUntilConverged polls changes, applies them, drains dirty queues,
 // and repeats until no more changes arrive after a drain.
 func replayUntilConverged(c *client.Client, cursor string, remoteFiles map[string]types.RemoteFile) (string, error) {
+	return replayUntilConvergedWithDirs(c, cursor, remoteFiles, nil)
+}
+
+// replayUntilConvergedWithDirs is the dir-aware variant: when dirSet is
+// non-nil, dir-level changes (mkdir / delete / move) update the set in
+// step with the file map so the bootstrap caller sees both projections
+// converged to the same cursor. Passing nil keeps the file-only contract.
+func replayUntilConvergedWithDirs(c *client.Client, cursor string, remoteFiles map[string]types.RemoteFile, dirSet map[string]struct{}) (string, error) {
 	for i := 0; i < maxReplayIterations; i++ {
 		resp, err := c.PollChanges(cursor)
 		if err != nil {
@@ -157,13 +207,81 @@ func replayUntilConverged(c *client.Client, cursor string, remoteFiles map[strin
 		}
 
 		dirtyQueue := applyChanges(resp.Changes, remoteFiles)
+		if dirSet != nil {
+			applyDirChanges(resp.Changes, dirSet)
+		}
 		if len(dirtyQueue) > 0 {
-			if err := drainDirtyQueue(c, dirtyQueue, remoteFiles); err != nil {
+			if err := drainDirtyQueueWithDirs(c, dirtyQueue, remoteFiles, dirSet); err != nil {
 				return "", err
 			}
 		}
 	}
 	return "", fmt.Errorf("delta replay did not converge after %d iterations", maxReplayIterations)
+}
+
+// applyDirChanges keeps dirSet in step with the change feed for the
+// directory rows themselves. It is intentionally narrower than
+// applyChanges (which operates on the file map): a mkdir / delete /
+// move on a directory updates dirSet, and dir puts are absorbed by
+// drainDirtyQueueWithDirs via a follow-up FetchRemoteMapWithDirs.
+func applyDirChanges(changes []types.ChangeEntry, dirSet map[string]struct{}) {
+	for _, ch := range changes {
+		if !ch.IsDir {
+			continue
+		}
+		before := strings.TrimSuffix(strings.TrimPrefix(ch.PathBefore, "/"), "/")
+		after := strings.TrimSuffix(strings.TrimPrefix(ch.PathAfter, "/"), "/")
+		switch ch.Action {
+		case "mkdir":
+			if after != "" && isSafeRelativePath(after) {
+				dirSet[after] = struct{}{}
+			}
+		case "delete":
+			deleteDirPrefix(dirSet, before)
+		case "move":
+			renameDirPrefix(dirSet, before, after)
+		}
+	}
+}
+
+func deleteDirPrefix(dirSet map[string]struct{}, dir string) {
+	if dir == "" {
+		for k := range dirSet {
+			delete(dirSet, k)
+		}
+		return
+	}
+	prefix := dir + "/"
+	delete(dirSet, dir)
+	for k := range dirSet {
+		if strings.HasPrefix(k, prefix) {
+			delete(dirSet, k)
+		}
+	}
+}
+
+func renameDirPrefix(dirSet map[string]struct{}, oldDir, newDir string) {
+	if oldDir == "" {
+		return
+	}
+	oldPrefix := oldDir + "/"
+	newPrefix := newDir + "/"
+	moved := make(map[string]struct{})
+	for k := range dirSet {
+		switch {
+		case k == oldDir:
+			moved[newDir] = struct{}{}
+			delete(dirSet, k)
+		case strings.HasPrefix(k, oldPrefix):
+			moved[newPrefix+strings.TrimPrefix(k, oldPrefix)] = struct{}{}
+			delete(dirSet, k)
+		}
+	}
+	for k := range moved {
+		if k != "" && isSafeRelativePath(k) {
+			dirSet[k] = struct{}{}
+		}
+	}
 }
 
 // applyChanges applies a batch of change events to the remote map.
@@ -279,8 +397,12 @@ func coalesceDirMove(queue []string, oldPath, newPath string) []string {
 }
 
 func drainDirtyQueue(c *client.Client, queue []string, remoteFiles map[string]types.RemoteFile) error {
+	return drainDirtyQueueWithDirs(c, queue, remoteFiles, nil)
+}
+
+func drainDirtyQueueWithDirs(c *client.Client, queue []string, remoteFiles map[string]types.RemoteFile, dirSet map[string]struct{}) error {
 	for _, path := range queue {
-		subFiles, err := FetchRemoteMap(c, "/"+path)
+		subFiles, subDirs, err := FetchRemoteMapWithDirs(c, "/"+path)
 		if err != nil {
 			if errors.Is(err, client.ErrNotFound) {
 				continue
@@ -289,6 +411,17 @@ func drainDirtyQueue(c *client.Client, queue []string, remoteFiles map[string]ty
 		}
 		for k, v := range subFiles {
 			remoteFiles[k] = v
+		}
+		if dirSet != nil {
+			// The dir-put root itself is also live.
+			if path != "" && isSafeRelativePath(path) {
+				dirSet[path] = struct{}{}
+			}
+			for _, d := range subDirs {
+				if d != "" && isSafeRelativePath(d) {
+					dirSet[d] = struct{}{}
+				}
+			}
 		}
 	}
 	return nil

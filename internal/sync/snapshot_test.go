@@ -8,6 +8,40 @@ import (
 
 func int64Ptr(v int64) *int64 { return &v }
 
+func TestSnapshotToRemoteDirs_KeepsLiveDirs(t *testing.T) {
+	items := []types.SnapshotItem{
+		{Path: "/", Type: "dir"},
+		{Path: "/docs/", Type: "dir"},
+		{Path: "/docs/a.txt", Type: "file"},
+		{Path: "/photos/", Type: "dir"},
+		{Path: "/photos/sub/", Type: "dir"},
+	}
+	dirs := SnapshotToRemoteDirs(items)
+	// Scope root (empty after trim) must be excluded so the local
+	// mount point isn't recreated by sync. Other dirs must survive
+	// with no trailing slash, sorted lexicographically.
+	want := []string{"docs", "photos", "photos/sub"}
+	if len(dirs) != len(want) {
+		t.Fatalf("got %v, want %v", dirs, want)
+	}
+	for i := range want {
+		if dirs[i] != want[i] {
+			t.Errorf("dirs[%d] = %q, want %q", i, dirs[i], want[i])
+		}
+	}
+}
+
+func TestSnapshotToRemoteDirs_RejectsTraversal(t *testing.T) {
+	items := []types.SnapshotItem{
+		{Path: "/../escape/", Type: "dir"},
+		{Path: "/safe/", Type: "dir"},
+	}
+	dirs := SnapshotToRemoteDirs(items)
+	if len(dirs) != 1 || dirs[0] != "safe" {
+		t.Errorf("dirs = %v, want [safe]", dirs)
+	}
+}
+
 func TestSnapshotToRemoteFiles_FiltersDirsAndStripsLeadingSlash(t *testing.T) {
 	items := []types.SnapshotItem{
 		{Path: "/docs/", Type: "dir"},

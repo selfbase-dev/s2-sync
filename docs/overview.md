@@ -36,6 +36,15 @@ Walk local → PollChanges(cursor) → expand dir_events → Compare (3-way)
 
 A post-Compare pass (`MergeFolderDeletes`) collapses runs of `DeleteRemote` plans that drain a directory subtree into a single `DeleteRemoteDir` plan, so the server's recursive cascade soft-delete runs in one round-trip and the directory entity itself is removed.
 
+### Directory lifecycle (pull side)
+
+Server-side directories are first-class rows (`is_directory=true`). The pull side mirrors them onto the local FS so the user sees the same tree on web and on disk:
+
+- **MkdirLocal**: a live remote dir with no file payload (e.g. the user clicked "new folder" on the web UI) is materialized as `os.MkdirAll`. Driven by `MaterializeDirPlans`, which suppresses dirs that some pending file pull will implicitly create.
+- **RmdirLocal**: emitted by `expandArchiveDelete` as a post-action when every per-file delete under the prefix is clean (no `PreserveLocalRename` from a drifted hash, no untracked descendant). The executor runs a non-recursive `os.Remove` AFTER the file deletes, so a stray `.DS_Store` keeps the shell intact via ENOTEMPTY. Scope-root deletes never rmdir — the local mount point is preserved.
+- **Case-insensitive guard**: on Mac/Windows, RmdirLocal also short-circuits when a fold-equivalent live archive entry exists (the inode is shared with a sibling that must survive).
+- **File move alone**: the source dir's row stays live, so no rmdir is emitted — a folder doesn't disappear because of an incidental file shuffle.
+
 ## 3-way merge (the core)
 
 Diffing local vs remote alone can't tell you which side changed. We keep the last-synced state (the **archive**) as the comparison anchor.
@@ -112,5 +121,5 @@ Dependency direction is one-way: `cmd` / `gui` → `service` → `sync` → `cli
 - Chunked upload for large files (>10MB) doesn't support `If-Match` → concurrent edits are last-writer-wins
 - Conflict resolution is fixed to local-wins (no 3-way content merge)
 - Local change detection is full walk + hash, not inotify-diff
-- Symlinks and special files are unsupported; empty local directories are not synced
+- Symlinks and special files are unsupported. Empty *local* directories are not pushed (the remote has no row for them); empty *remote* directories ARE materialized locally via MkdirLocal, so a folder you create on the web UI shows up on disk.
 - Sync scope is whatever the token grants; the absolute scope path is opaque to the client (the API exposes only relative paths). Different scopes need a different token and a different directory.
