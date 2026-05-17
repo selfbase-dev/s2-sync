@@ -51,7 +51,7 @@ func FoldKey(p string) string {
 
 // DetectCollisions groups paths by FoldKey. Groups with >1 member are
 // collisions that the caller must handle (typically skip + warning
-//, not stop the whole sync).
+// , not stop the whole sync).
 //
 // Returned paths are NormalizePath-canonical and sorted UTF-8 bytewise
 // lexicographic within each group — this determinism is what makes

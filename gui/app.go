@@ -16,12 +16,12 @@ import (
 // Wails context captured during startup and exposes bound methods in
 // bindings.go for the React UI to call.
 type App struct {
-	ctx       context.Context
-	svc       *service.SyncService
-	endpoint  string
-	logFile   string
-	fileSink  *sink.File
-	logger    *slog.Logger
+	ctx      context.Context
+	svc      *service.SyncService
+	endpoint string
+	logFile  string
+	fileSink *sink.File
+	logger   *slog.Logger
 
 	loginMu     sync.Mutex
 	loginCancel context.CancelFunc
