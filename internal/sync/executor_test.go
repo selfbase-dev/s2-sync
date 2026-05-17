@@ -55,7 +55,7 @@ func TestExecute_Push_RemoteKey(t *testing.T) {
 
 			state := testStateFromArchive(nil)
 			plans := []types.SyncPlan{{Path: tc.planPath, Action: types.Push}}
-			Execute(plans, localDir, c, state, false)
+			execute(plans, localDir, c, state, false, executeDeps{})
 
 			if gotURL != tc.wantURL {
 				t.Errorf("URL.Path = %q, want %q", gotURL, tc.wantURL)
@@ -88,7 +88,7 @@ func TestExecute_Push(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Push}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestExecute_Push_CAS_Update(t *testing.T) {
 	})
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Push}}
 
-	Execute(plans, localDir, c, state, false)
+	execute(plans, localDir, c, state, false, executeDeps{})
 
 	// Existing file → If-Match: "1"
 	if gotIfMatch != `"1"` {
@@ -162,7 +162,7 @@ func TestExecute_Pull(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "doc.txt", Action: types.Pull}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestExecute_DeleteLocal(t *testing.T) {
 	})
 	plans := []types.SyncPlan{{Path: "gone.txt", Action: types.DeleteLocal}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Deleted != 1 {
 		t.Errorf("deleted = %d, want 1", result.Deleted)
 	}
@@ -231,7 +231,7 @@ func TestExecute_DeleteRemote(t *testing.T) {
 	})
 	plans := []types.SyncPlan{{Path: "old.txt", Action: types.DeleteRemote}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Deleted != 1 {
 		t.Errorf("deleted = %d, want 1", result.Deleted)
 	}
@@ -268,7 +268,7 @@ func TestExecute_DeleteRemoteDir(t *testing.T) {
 	})
 	plans := []types.SyncPlan{{Path: "foo", Action: types.DeleteRemoteDir}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Deleted != 3 {
 		t.Errorf("deleted = %d, want 3", result.Deleted)
 	}
@@ -303,7 +303,7 @@ func TestExecute_DeleteRemoteDir_DryRun(t *testing.T) {
 	})
 	plans := []types.SyncPlan{{Path: "foo", Action: types.DeleteRemoteDir}}
 
-	result, _ := Execute(plans, localDir, c, state, true)
+	result, _ := execute(plans, localDir, c, state, true, executeDeps{})
 	if called {
 		t.Error("dry-run must not call server")
 	}
@@ -345,7 +345,7 @@ func TestExecute_Move_Success(t *testing.T) {
 		Hash:   "h1",
 	}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Moved != 1 {
 		t.Errorf("moved = %d, want 1", result.Moved)
 	}
@@ -393,7 +393,7 @@ func TestExecute_Move_409_FallsBackToSkip(t *testing.T) {
 		Hash:   "h1",
 	}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Moved != 0 {
 		t.Errorf("moved = %d, want 0 on 409", result.Moved)
 	}
@@ -433,7 +433,7 @@ func TestExecute_MoveApply_PreservesInode(t *testing.T) {
 		Action: types.MoveApply,
 	}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Moved != 1 {
 		t.Errorf("moved = %d, want 1", result.Moved)
 	}
@@ -469,7 +469,7 @@ func TestExecute_SkipCaseConflict_NoOp(t *testing.T) {
 	})
 	plans := []types.SyncPlan{{Path: "File.txt", Action: types.SkipCaseConflict}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Skipped != 1 {
 		t.Errorf("skipped = %d, want 1", result.Skipped)
 	}
@@ -494,7 +494,7 @@ func TestExecute_Conflict_IdenticalContent(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Conflicts != 1 {
 		t.Errorf("conflicts = %d, want 1", result.Conflicts)
 	}
@@ -536,7 +536,7 @@ func TestExecute_Conflict_DifferentContent(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Conflicts != 1 {
 		t.Errorf("conflicts = %d, want 1", result.Conflicts)
 	}
@@ -594,7 +594,7 @@ func TestExecute_Conflict_Remote404_PushesLocal(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -635,7 +635,7 @@ func TestExecute_Pull_RevisionPruned_FallsBackToPath(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "doc.txt", Action: types.Pull, RevisionID: "rev-pruned"}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -671,7 +671,7 @@ func TestExecute_Pull_RevisionPruned_FileAlsoDeleted(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "gone.txt", Action: types.Pull, RevisionID: "rev-gone"}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute returned err: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestExecute_Pull_NoRevisionID_404_BucketedAsSkip(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "ghost.txt", Action: types.Pull}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -729,7 +729,7 @@ func TestExecute_Pull_5xx_StaysInErrors(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "flaky.txt", Action: types.Pull, RevisionID: "rev-x"}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -753,7 +753,7 @@ func TestExecute_Pull_RevisionPinned_RecordsRevisionID(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "doc.txt", Action: types.Pull, RevisionID: "rev-abc"}}
 
-	Execute(plans, localDir, c, state, false)
+	execute(plans, localDir, c, state, false, executeDeps{})
 
 	fs := state.Files["doc.txt"]
 	if fs.RevisionID != "rev-abc" {
@@ -787,7 +787,7 @@ func TestExecute_Conflict_RevisionPruned_FallsBack(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Conflict, RevisionID: "rev-old"}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -811,7 +811,7 @@ func TestExecute_Pull_IdempotentSkip_RevisionID(t *testing.T) {
 	})
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, RevisionID: "rev-same"}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -836,7 +836,7 @@ func TestExecute_Pull_NoSkip_HashOnlyNotSufficient(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, Hash: "some-hash"}}
 
-	result, err := Execute(plans, localDir, c, state, false)
+	result, err := execute(plans, localDir, c, state, false, executeDeps{})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -860,7 +860,7 @@ func TestExecute_Pull_NoSkip_DeleteRecreate(t *testing.T) {
 	// Different RevisionID = different node (delete→recreate same path)
 	plans := []types.SyncPlan{{Path: "file.txt", Action: types.Pull, RevisionID: "rev-new-node", Hash: "new-hash"}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Pulled != 1 {
 		t.Errorf("pulled = %d, want 1 (different revision must download)", result.Pulled)
 	}
@@ -878,7 +878,7 @@ func TestExecute_Pull_NoSkip_NoArchive(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "new.txt", Action: types.Pull, RevisionID: "rev-1"}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
+	result, _ := execute(plans, localDir, c, state, false, executeDeps{})
 	if result.Pulled != 1 {
 		t.Errorf("pulled = %d, want 1 (no archive entry must download)", result.Pulled)
 	}
@@ -898,7 +898,7 @@ func TestExecute_DryRun(t *testing.T) {
 		{Path: "other.txt", Action: types.Pull},
 	}
 
-	result, _ := Execute(plans, localDir, c, state, true)
+	result, _ := execute(plans, localDir, c, state, true, executeDeps{})
 	if result.Pushed != 1 || result.Pulled != 1 {
 		t.Errorf("dry-run: pushed=%d pulled=%d, want 1/1", result.Pushed, result.Pulled)
 	}
