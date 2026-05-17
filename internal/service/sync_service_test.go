@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -51,7 +52,7 @@ func TestSetErrorLogsAndUpdatesStatus(t *testing.T) {
 
 func TestStartErrorsOnBadPath(t *testing.T) {
 	s, _ := newTestService(t)
-	err := s.Start(nil, Mount{Path: "/nonexistent/dir/that/should/not/exist"})
+	err := s.Start(context.TODO(), Mount{Path: "/nonexistent/dir/that/should/not/exist"})
 	if err == nil {
 		t.Fatal("expected error on missing directory")
 	}
@@ -71,7 +72,7 @@ func TestStartAdmissionIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.Start(nil, badMount); err == nil {
+			if err := s.Start(context.TODO(), badMount); err == nil {
 				atomicAdd(&ok)
 			} else {
 				atomicAdd(&fail)
