@@ -169,4 +169,3 @@ func TestWalk_LocalCollision(t *testing.T) {
 		t.Errorf("winner %q should be in Files", winner)
 	}
 }
-

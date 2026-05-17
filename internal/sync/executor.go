@@ -70,20 +70,10 @@ func (d executeDeps) log() *slog.Logger {
 	return slog.Default()
 }
 
-// Execute applies the sync plans against local filesystem and remote storage.
+// execute applies the sync plans against local filesystem and remote storage.
 //
 // All plan paths are relative to the token's base_path (which the server
 // keeps opaque); they are sent to the API as-is.
-func Execute(
-	plans []types.SyncPlan,
-	localRoot string,
-	c *client.Client,
-	state *State,
-	dryRun bool,
-) (*ExecuteResult, error) {
-	return execute(plans, localRoot, c, state, dryRun, executeDeps{})
-}
-
 func execute(
 	plans []types.SyncPlan,
 	localRoot string,

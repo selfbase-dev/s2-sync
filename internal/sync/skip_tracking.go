@@ -13,6 +13,7 @@
 package sync
 
 import (
+	"context"
 	"log/slog"
 
 	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
@@ -59,7 +60,7 @@ func logSkippedSummary(logger *slog.Logger, result *ExecuteResult, state *State)
 	if len(result.RevisionSkipped) >= skippedSummaryWarnThreshold {
 		level = slog.LevelWarn
 	}
-	logger.Log(nil, level, slog2.SyncSkippedSummary,
+	logger.Log(context.TODO(), level, slog2.SyncSkippedSummary,
 		"skipped_count", len(result.RevisionSkipped),
 		"skipped_paths", paths,
 	)

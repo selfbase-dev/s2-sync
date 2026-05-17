@@ -50,7 +50,7 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		Windows: webviewOptions(),
+		Windows:          webviewOptions(),
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
 		OnStartup:        app.startup,
 		OnShutdown: func(ctx context.Context) {
