@@ -50,6 +50,56 @@ func TestSetErrorLogsAndUpdatesStatus(t *testing.T) {
 	}
 }
 
+func TestNewStartsNotSyncing(t *testing.T) {
+	s, _ := newTestService(t)
+	if s.Status().Syncing {
+		t.Fatalf("new service: want Syncing=false")
+	}
+}
+
+func TestBeginSyncSetsSyncingTrue(t *testing.T) {
+	s, _ := newTestService(t)
+	s.BeginSync()
+	if !s.Status().Syncing {
+		t.Fatalf("after BeginSync: want Syncing=true")
+	}
+}
+
+func TestEndSyncResetsSyncing(t *testing.T) {
+	s, _ := newTestService(t)
+	s.BeginSync()
+	s.EndSync()
+	if s.Status().Syncing {
+		t.Fatalf("after EndSync: want Syncing=false")
+	}
+}
+
+func TestSetErrorClearsSyncing(t *testing.T) {
+	s, _ := newTestService(t)
+	s.BeginSync()
+	s.setError(errString("boom"))
+	if s.Status().Syncing {
+		t.Fatalf("after setError: want Syncing=false (must not leave a sync indicator on errors)")
+	}
+}
+
+func TestMarkSyncedDoesNotTouchSyncing(t *testing.T) {
+	// markSynced records LastSync; the begin/end bracket is the sole
+	// owner of the Syncing flag. Make sure that contract holds in both
+	// directions.
+	s, _ := newTestService(t)
+	s.BeginSync()
+	s.markSynced()
+	if !s.Status().Syncing {
+		t.Fatalf("markSynced cleared Syncing while a sync is in flight")
+	}
+	s.EndSync()
+	s.markSynced()
+	if s.Status().Syncing {
+		t.Fatalf("markSynced flipped Syncing back on after EndSync")
+	}
+}
+
 func TestStartErrorsOnBadPath(t *testing.T) {
 	s, _ := newTestService(t)
 	err := s.Start(context.TODO(), Mount{Path: "/nonexistent/dir/that/should/not/exist"})

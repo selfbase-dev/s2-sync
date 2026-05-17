@@ -2,6 +2,10 @@ export type Status = "idle" | "running" | "stopping" | "error";
 
 export interface StateInfo {
   status: Status;
+  // True while a sync run is in flight. Orthogonal to status: a Running
+  // service is "up to date" when syncing is false and "syncing now"
+  // when it is true.
+  syncing?: boolean;
   mount?: { path: string };
   error?: string;
   lastSync?: string;

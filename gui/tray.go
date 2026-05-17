@@ -66,15 +66,22 @@ func onTrayReady(app *App) {
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit S2 Sync", "Exit")
 
-	// Keep tray label/visibility in sync with service status. Polling
+	// Keep tray label/visibility in sync with service state. Polling
 	// at 1Hz is cheap and avoids wiring a second observer mechanism on
 	// SyncService now that all state changes route through *slog.Logger.
+	// Track both Status and the in-flight Syncing flag so the tray can
+	// distinguish "up to date" from "syncing now" while still Running.
+	type trayKey struct {
+		status  service.Status
+		syncing bool
+	}
 	go func() {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
-		var last service.Status
+		var last trayKey
 		for range t.C {
-			cur := app.svc.Status().Status
+			st := app.svc.Status()
+			cur := trayKey{status: st.Status, syncing: st.Syncing}
 			if cur != last {
 				last = cur
 				refreshTray(app, mStatus, mStart, mStop)
@@ -120,11 +127,23 @@ func refreshTray(app *App, mStatus, mStart, mStop *systray.MenuItem) {
 	// SetTitle is what the macOS menu bar shows. On Windows the tray
 	// only renders the icon, so status is also pushed into the tooltip
 	// (visible on hover) and the disabled menu row.
-	switch app.svc.Status().Status {
+	//
+	// Running splits into two visually-distinct sub-states based on the
+	// Syncing flag: ✓ (up to date) vs ⟳ (sync run in flight). The icon
+	// itself stays the same baked-in PNG for now; an animated icon is a
+	// follow-up.
+	st := app.svc.Status()
+	switch st.Status {
 	case service.StatusRunning:
-		systray.SetTitle("S2 ●")
-		systray.SetTooltip("S2 Sync — running")
-		mStatus.SetTitle("Status: running")
+		if st.Syncing {
+			systray.SetTitle("S2 ⟳")
+			systray.SetTooltip("S2 Sync — syncing…")
+			mStatus.SetTitle("Status: syncing…")
+		} else {
+			systray.SetTitle("S2 ✓")
+			systray.SetTooltip("S2 Sync — up to date")
+			mStatus.SetTitle("Status: up to date")
+		}
 		mStart.Hide()
 		mStop.Show()
 	case service.StatusStopping:
