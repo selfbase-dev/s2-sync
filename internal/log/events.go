@@ -8,11 +8,13 @@
 package log
 
 const (
-	SyncStart = "sync.start"
-	SyncDone  = "sync.done"
-	SyncError = "sync.error"
-	SyncIdle  = "sync.idle"
-	SyncPlan  = "sync.plan"
+	SyncStart          = "sync.start"
+	SyncDone           = "sync.done"
+	SyncError          = "sync.error"
+	SyncIdle           = "sync.idle"
+	SyncPlan           = "sync.plan"
+	SyncSkippedSummary = "sync.skipped_summary"
+	SyncSkipDegenerate = "sync.skip_degenerate"
 
 	FilePush     = "file.push"
 	FilePull     = "file.pull"

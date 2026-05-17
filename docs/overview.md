@@ -54,11 +54,12 @@ The archive is a **disposable cache**. If it's lost we fall back to an initial s
 
 SQLite (WAL), managed in `statedb.go`. Three tables:
 
-| table          | role                                                                                   |
-|----------------|----------------------------------------------------------------------------------------|
-| `state_meta`   | cursor / endpoint / user_id / token_id / collision_keys                                |
-| `files`        | the archive itself (path → local_hash, content_version, revision_id)                   |
-| `pushed_seqs`  | seqs of our own pushes — filtered out of the next poll so we don't pull our own writes |
+| table                | role                                                                                   |
+|----------------------|----------------------------------------------------------------------------------------|
+| `state_meta`         | cursor / endpoint / user_id / token_id / collision_keys                                |
+| `files`              | the archive itself (path → local_hash, content_version, revision_id)                   |
+| `pushed_seqs`        | seqs of our own pushes — filtered out of the next poll so we don't pull our own writes |
+| `skipped_revisions`  | consecutive-skip counter for events dropped on revision-fetch 404 (degenerate-loop diagnostic) |
 
 Schema mismatches or corruption are quarantined to `.corrupt.<ts>/` and a fresh empty DB is created, which naturally falls back to an initial sync. Invariant: 1 sync root ⇔ 1 token ⇔ 1 state.db.
 
@@ -68,6 +69,7 @@ Schema mismatches or corruption are quarantined to `.corrupt.<ts>/` and a fresh 
 |-------------------------------------------------|-------------------------------------------------------------------------------------------------|
 | Concurrent push overwrites                      | `If-Match: <archive content_version>` CAS. 412/409 → conflict                                   |
 | Remote changes again mid-pull                   | Fetch by pinned `revision_id` (`/api/v1/revisions/:id`); fall back to path if unavailable          |
+| Pinned revision pruned + file also gone (404)   | Bucket the event as a skip, advance the cursor, record in `skipped_revisions` for degenerate-loop warn |
 | Re-pulling our own push                         | Push seq recorded in `pushed_seqs`, filtered out of poll results                                |
 | Local changes mid-pull                          | Local hash checked before/after the `.s2tmp` write; mismatch → abort and convert to conflict    |
 | Crash mid-write                                 | `.s2tmp` + `os.Rename` for atomic file swap; state changes inside SQLite tx                     |

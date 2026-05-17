@@ -21,7 +21,11 @@ import (
 // archive is keyed to (endpoint, user_id, token_id). Switching tokens
 // scoped to different sub-trees on the same local dir must trigger a
 // full resync, which (user_id) alone cannot detect.
-const schemaVersion = 3
+// v4: adds skipped_revisions to detect degenerate skip loops across
+// syncs — a revision-fetch 404 advances the cursor (correct), but the
+// same (path, revision_id) repeating across syncs is a smell worth
+// surfacing.
+const schemaVersion = 4
 
 const schemaSQL = `
 PRAGMA journal_mode = WAL;
@@ -44,6 +48,13 @@ CREATE TABLE IF NOT EXISTS files (
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS pushed_seqs (seq INTEGER PRIMARY KEY);
+
+CREATE TABLE IF NOT EXISTS skipped_revisions (
+    key             TEXT PRIMARY KEY,
+    path            TEXT NOT NULL,
+    revision_id     TEXT NOT NULL,
+    skip_count      INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 `
 
 // dbFromAny is a tiny helper to keep *sql.DB hidden in State.db as
@@ -118,18 +129,27 @@ func quarantineDB(dbPath string) error {
 
 // dbSnapshot is everything pulled from the DB at LoadState time.
 type dbSnapshot struct {
-	Cursor        string
-	Endpoint      string
-	UserID        string
-	TokenID       string
-	CollisionKeys string
-	Files         map[string]types.FileState
-	PushedSeqs    []int64
+	Cursor           string
+	Endpoint         string
+	UserID           string
+	TokenID          string
+	CollisionKeys    string
+	Files            map[string]types.FileState
+	PushedSeqs       []int64
+	SkippedRevisions map[string]skippedRevisionRow
+}
+
+// skippedRevisionRow mirrors the skipped_revisions table row in memory.
+type skippedRevisionRow struct {
+	Path       string
+	RevisionID string
+	SkipCount  int
 }
 
 func loadSnapshot(db *sql.DB) (*dbSnapshot, error) {
 	snap := &dbSnapshot{
-		Files: make(map[string]types.FileState),
+		Files:            make(map[string]types.FileState),
+		SkippedRevisions: make(map[string]skippedRevisionRow),
 	}
 
 	row := db.QueryRow(`SELECT cursor, endpoint, user_id, token_id, collision_keys FROM state_meta WHERE id = 1`)
@@ -166,7 +186,24 @@ func loadSnapshot(db *sql.DB) (*dbSnapshot, error) {
 		}
 		snap.PushedSeqs = append(snap.PushedSeqs, seq)
 	}
-	return snap, seqRows.Err()
+	if err := seqRows.Err(); err != nil {
+		return nil, err
+	}
+
+	skipRows, err := db.Query(`SELECT key, path, revision_id, skip_count FROM skipped_revisions`)
+	if err != nil {
+		return nil, fmt.Errorf("read skipped_revisions: %w", err)
+	}
+	defer skipRows.Close()
+	for skipRows.Next() {
+		var key string
+		var row skippedRevisionRow
+		if err := skipRows.Scan(&key, &row.Path, &row.RevisionID, &row.SkipCount); err != nil {
+			return nil, fmt.Errorf("scan skipped_revisions: %w", err)
+		}
+		snap.SkippedRevisions[key] = row
+	}
+	return snap, skipRows.Err()
 }
 
 // flushParams bundles what Save writes in a single transaction.
@@ -184,6 +221,11 @@ type flushParams struct {
 
 	AddSeqs    []int64
 	PruneBelow *int64 // if non-nil, DELETE FROM pushed_seqs WHERE seq < *PruneBelow
+
+	// SkippedRevisions, when non-nil, replaces the entire
+	// skipped_revisions table contents in a single transaction. Empty
+	// map clears it. A nil value leaves the table unchanged.
+	SkippedRevisions map[string]skippedRevisionRow
 }
 
 func flush(db *sql.DB, p flushParams) error {
@@ -257,6 +299,27 @@ func flush(db *sql.DB, p flushParams) error {
 	if p.PruneBelow != nil {
 		if _, err := tx.Exec(`DELETE FROM pushed_seqs WHERE seq < ?`, *p.PruneBelow); err != nil {
 			return fmt.Errorf("prune pushed_seqs: %w", err)
+		}
+	}
+
+	if p.SkippedRevisions != nil {
+		if _, err := tx.Exec(`DELETE FROM skipped_revisions`); err != nil {
+			return fmt.Errorf("clear skipped_revisions: %w", err)
+		}
+		if len(p.SkippedRevisions) > 0 {
+			stmt, err := tx.Prepare(
+				`INSERT INTO skipped_revisions (key, path, revision_id, skip_count) VALUES (?, ?, ?, ?)`,
+			)
+			if err != nil {
+				return fmt.Errorf("prepare skip insert: %w", err)
+			}
+			for key, row := range p.SkippedRevisions {
+				if _, err := stmt.Exec(key, row.Path, row.RevisionID, row.SkipCount); err != nil {
+					stmt.Close()
+					return fmt.Errorf("insert skip %s: %w", key, err)
+				}
+			}
+			stmt.Close()
 		}
 	}
 
