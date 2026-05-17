@@ -12,15 +12,47 @@ import (
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
+// SkippedEvent describes a pull event that was dropped because both the
+// revision-pinned and path-based fetches returned 404. The event is not
+// an error: the server has the right to prune revisions on its own
+// schedule, and the client must let the cursor advance past such events
+// instead of retrying forever.
+//
+// Reason classifies the fail pattern so degenerate-loop diagnostics can
+// distinguish "pin 404" (revision pruned mid-flight) from "both 404"
+// (file genuinely gone). Both currently advance the cursor; the
+// distinction is informational only.
+type SkippedEvent struct {
+	Path       string
+	RevisionID string
+	Reason     string // "revision_and_path_404" | "path_404"
+}
+
+// Key returns the persistent dedup key used to detect degenerate loops
+// across syncs. Empty RevisionID falls back to path-only so plain
+// path-fetch 404s are still tracked.
+func (e SkippedEvent) Key() string {
+	if e.RevisionID == "" {
+		return e.Path + "|"
+	}
+	return e.Path + "|" + e.RevisionID
+}
+
 // ExecuteResult tracks the outcome of sync execution.
+//
+// RevisionSkipped collects pull events dropped due to 404 on both the
+// revision-pinned and path-based fetches. These are NOT errors: the
+// runner advances the cursor past them so the sync does not loop
+// forever on a pruned revision (the 2026-05-10 incident).
 type ExecuteResult struct {
-	Pushed    int
-	Pulled    int
-	Deleted   int
-	Moved     int
-	Skipped   int
-	Conflicts int
-	Errors    []error
+	Pushed          int
+	Pulled          int
+	Deleted         int
+	Moved           int
+	Skipped         int
+	Conflicts       int
+	Errors          []error
+	RevisionSkipped []SkippedEvent
 }
 
 // executeDeps holds unexported seams for testing timing-dependent behavior
@@ -97,6 +129,29 @@ func execute(
 			if err := executePull(localPath, remoteKey, plan.Path, plan.RevisionID, c, state, deps.beforePullCommit); err != nil {
 				if errors.Is(err, errPullAborted) {
 					result.Conflicts++
+					continue
+				}
+				if errors.Is(err, client.ErrNotFound) {
+					// Both revision-pinned and path-based fetch returned 404.
+					// Drop the event and let the cursor advance — retrying
+					// will never succeed because the server has pruned this
+					// revision (and possibly the file). The fail pattern is
+					// distinct from "pin 404 only" because path fallback
+					// already happens inside downloadWithFallback.
+					ev := SkippedEvent{
+						Path:       plan.Path,
+						RevisionID: plan.RevisionID,
+						Reason:     "revision_and_path_404",
+					}
+					if plan.RevisionID == "" {
+						ev.Reason = "path_404"
+					}
+					result.RevisionSkipped = append(result.RevisionSkipped, ev)
+					log.Warn(slog2.FileSkip,
+						"path", plan.Path,
+						"revision_id", plan.RevisionID,
+						"reason", ev.Reason,
+					)
 					continue
 				}
 				result.Errors = append(result.Errors, fmt.Errorf("pull %s: %w", plan.Path, err))

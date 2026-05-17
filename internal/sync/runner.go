@@ -67,10 +67,17 @@ func RunInitialSync(c *client.Client, localDir string, state *State, opts SyncOp
 		return err
 	}
 
+	// Cursor advances when there are no retryable errors. Revision-fetch
+	// 404 skips (RevisionSkipped) do NOT block advance: the server is
+	// free to prune revisions on its own schedule, and holding the cursor
+	// on a permanent 404 turns it into a poison pill (the 2026-05-10
+	// incident). Push failures, 5xx, and network errors still block.
 	hasErrors := result != nil && len(result.Errors) > 0
 	if !hasErrors && snapshotCursor != "" {
 		state.Cursor = snapshotCursor
 	}
+	recordSkippedEvents(state, result)
+	logSkippedSummary(opts.logger(), result, state)
 
 	if !opts.DryRun {
 		if err := state.Save(); err != nil {
@@ -156,6 +163,11 @@ func RunIncrementalSync(c *client.Client, localDir string, state *State, opts Sy
 		return err
 	}
 
+	// Cursor advances when there are no retryable errors. Revision-fetch
+	// 404 skips (RevisionSkipped) do NOT block advance: the server is
+	// free to prune revisions on its own schedule, and holding the cursor
+	// on a permanent 404 turns it into a poison pill (the 2026-05-10
+	// incident). Push failures, 5xx, and network errors still block.
 	hasErrors := result != nil && len(result.Errors) > 0
 	if !hasErrors {
 		if dirOutcome.NewPrimaryCursor != "" {
@@ -164,6 +176,8 @@ func RunIncrementalSync(c *client.Client, localDir string, state *State, opts Sy
 			state.Cursor = resp.NextCursor
 		}
 	}
+	recordSkippedEvents(state, result)
+	logSkippedSummary(opts.logger(), result, state)
 
 	if len(resp.Changes) > 0 {
 		state.PrunePushedSeqs(resp.Changes[0].Seq)
@@ -283,4 +297,3 @@ func countPlanDeletes(plans []types.SyncPlan, archive map[string]types.FileState
 	}
 	return n
 }
-

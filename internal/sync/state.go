@@ -56,6 +56,14 @@ type State struct {
 
 	pushedSeqs map[int64]struct{}
 
+	// skippedRevisions tracks how many consecutive syncs have skipped a
+	// given (path, revision_id) due to revision-fetch 404. Empty after
+	// the first sync that does NOT re-skip the same key; persisted
+	// across syncs in state.db.skipped_revisions. Used to surface
+	// degenerate skip loops (a "cursor stuck on poison event" smell).
+	skippedRevisions map[string]skippedRevisionRow
+	skipDirty        bool
+
 	identity Identity
 
 	// dirty tracks paths whose row differs from what's in the DB
@@ -153,10 +161,14 @@ func openAndLoad(syncRoot string, identity Identity) (*State, error) {
 		Cursor:             snap.Cursor,
 		ReportedCollisions: parseCollisionKeys(snap.CollisionKeys),
 		pushedSeqs:         make(map[int64]struct{}, len(snap.PushedSeqs)),
+		skippedRevisions:   snap.SkippedRevisions,
 		identity:           Identity{Endpoint: snap.Endpoint, UserID: snap.UserID, TokenID: snap.TokenID},
 		dirty:              make(map[string]struct{}),
 		db:                 db,
 		root:               syncRoot,
+	}
+	if state.skippedRevisions == nil {
+		state.skippedRevisions = make(map[string]skippedRevisionRow)
 	}
 	for _, seq := range snap.PushedSeqs {
 		state.pushedSeqs[seq] = struct{}{}
@@ -203,6 +215,8 @@ func (s *State) quarantineAndReopen(syncRoot string, identity Identity) error {
 	s.Files = snap.Files
 	s.Cursor = snap.Cursor
 	s.pushedSeqs = make(map[int64]struct{})
+	s.skippedRevisions = make(map[string]skippedRevisionRow)
+	s.skipDirty = false
 	s.dirty = make(map[string]struct{})
 	s.clearAll = false
 	s.addSeqs = nil
@@ -277,6 +291,18 @@ func (s *State) Save() error {
 	p.AddSeqs = s.addSeqs
 	p.PruneBelow = s.pruneBelow
 
+	if s.skipDirty {
+		// Replace-all semantics: pass the full current map (possibly
+		// empty) so deletions of cleared keys are realised. Whole-table
+		// rewrite is acceptable because the set stays tiny in practice
+		// (only events being skipped right now, usually 0).
+		snapshot := make(map[string]skippedRevisionRow, len(s.skippedRevisions))
+		for k, v := range s.skippedRevisions {
+			snapshot[k] = v
+		}
+		p.SkippedRevisions = snapshot
+	}
+
 	if err := flush(dbFromAny(s.db), p); err != nil {
 		return err
 	}
@@ -285,6 +311,7 @@ func (s *State) Save() error {
 	s.clearAll = false
 	s.addSeqs = nil
 	s.pruneBelow = nil
+	s.skipDirty = false
 	return nil
 }
 
@@ -360,7 +387,7 @@ func (s *State) ClearFiles() {
 // SetReportedCollisions replaces the debounce set with keys, deduped
 // and sorted. Returns the newly-appeared and newly-resolved keys
 // relative to the previous value, so the caller can log only the diff
-//: warning is debounced; same collision does not re-log).
+// : warning is debounced; same collision does not re-log).
 // Save writes state_meta unconditionally, so no dirty flag needed.
 func (s *State) SetReportedCollisions(keys []string) (added, resolved []string) {
 	s.mu.Lock()
@@ -389,6 +416,78 @@ func (s *State) IsPushedSeq(seq int64) bool {
 	defer s.mu.Unlock()
 	_, ok := s.pushedSeqs[seq]
 	return ok
+}
+
+// RecordSkippedRevisions reconciles the persistent skip counter with
+// the events this sync just skipped:
+//
+//   - keys present in events have their counter incremented (or
+//     inserted at 1 if new)
+//   - keys absent from events but present in the persisted set are
+//     dropped — a sync that did NOT re-skip the same (path,
+//     revision_id) means the loop, if any, is broken
+//
+// Replace-all semantics keep the table bounded (at most one row per
+// currently-skipped event). The counter is purely diagnostic; the
+// runner advances the cursor regardless of count.
+func (s *State) RecordSkippedRevisions(events []SkippedEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := make(map[string]skippedRevisionRow, len(events))
+	for _, e := range events {
+		key := e.Key()
+		row := skippedRevisionRow{
+			Path:       e.Path,
+			RevisionID: e.RevisionID,
+			SkipCount:  1,
+		}
+		if prev, ok := s.skippedRevisions[key]; ok {
+			row.SkipCount = prev.SkipCount + 1
+		}
+		// In case the same event appears twice in one sync (defensive:
+		// shouldn't happen because each event is one plan), don't
+		// double-count within a single sync.
+		if existing, ok := next[key]; ok {
+			row.SkipCount = existing.SkipCount
+		}
+		next[key] = row
+	}
+
+	// Detect any change vs. the previous map (additions, removals,
+	// count bumps) so we don't dirty the DB needlessly when both old
+	// and new are empty (the common case).
+	if !skippedMapsEqual(s.skippedRevisions, next) {
+		s.skippedRevisions = next
+		s.skipDirty = true
+	}
+}
+
+// SkippedRevisionCount returns the persisted consecutive-skip count for
+// the given SkippedEvent.Key(). Returns 0 if the key is not tracked.
+func (s *State) SkippedRevisionCount(key string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if row, ok := s.skippedRevisions[key]; ok {
+		return row.SkipCount
+	}
+	return 0
+}
+
+// skippedMapsEqual returns true when two skip maps would produce the
+// same persisted state. Used to avoid flagging skipDirty when the
+// reconcile is a no-op.
+func skippedMapsEqual(a, b map[string]skippedRevisionRow) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || av.SkipCount != bv.SkipCount || av.Path != bv.Path || av.RevisionID != bv.RevisionID {
+			return false
+		}
+	}
+	return true
 }
 
 // PrunePushedSeqs drops seqs older than minSeq from both the in-memory

@@ -12,8 +12,9 @@ func testStateFromArchive(archive map[string]types.FileState) *State {
 		archive = make(map[string]types.FileState)
 	}
 	return &State{
-		Files:      archive,
-		dirty:      make(map[string]struct{}),
-		pushedSeqs: make(map[int64]struct{}),
+		Files:            archive,
+		dirty:            make(map[string]struct{}),
+		pushedSeqs:       make(map[int64]struct{}),
+		skippedRevisions: make(map[string]skippedRevisionRow),
 	}
 }

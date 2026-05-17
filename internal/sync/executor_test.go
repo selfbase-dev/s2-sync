@@ -656,6 +656,10 @@ func TestExecute_Pull_RevisionPruned_FallsBackToPath(t *testing.T) {
 	}
 }
 
+// When both the revision-pinned and path-based fetches return 404, the
+// event is bucketed as RevisionSkipped (not Errors) so the cursor can
+// advance past a permanently-pruned event. Retrying forever on a 404
+// turns the cursor into a poison pill (the 2026-05-10 incident).
 func TestExecute_Pull_RevisionPruned_FileAlsoDeleted(t *testing.T) {
 	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
@@ -667,9 +671,73 @@ func TestExecute_Pull_RevisionPruned_FileAlsoDeleted(t *testing.T) {
 	state := testStateFromArchive(nil)
 	plans := []types.SyncPlan{{Path: "gone.txt", Action: types.Pull, RevisionID: "rev-gone"}}
 
-	result, _ := Execute(plans, localDir, c, state, false)
-	if len(result.Errors) == 0 {
-		t.Error("expected error when both revision and path return 404")
+	result, err := Execute(plans, localDir, c, state, false)
+	if err != nil {
+		t.Fatalf("Execute returned err: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("Errors = %v, want empty (404 must not block cursor advance)", result.Errors)
+	}
+	if len(result.RevisionSkipped) != 1 {
+		t.Fatalf("RevisionSkipped count = %d, want 1", len(result.RevisionSkipped))
+	}
+	got := result.RevisionSkipped[0]
+	if got.Path != "gone.txt" || got.RevisionID != "rev-gone" || got.Reason != "revision_and_path_404" {
+		t.Errorf("RevisionSkipped[0] = %+v, want path=gone.txt revision_id=rev-gone reason=revision_and_path_404", got)
+	}
+	if result.Pulled != 0 {
+		t.Errorf("Pulled = %d, want 0", result.Pulled)
+	}
+}
+
+// Path-only pull (no revision id) that 404s is also a skip, not an
+// error. The fail-pattern label distinguishes it from the pin-fallback
+// path for degenerate-loop diagnostics.
+func TestExecute_Pull_NoRevisionID_404_BucketedAsSkip(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.WriteHeader(404)
+		}
+	})
+
+	localDir := t.TempDir()
+	state := testStateFromArchive(nil)
+	plans := []types.SyncPlan{{Path: "ghost.txt", Action: types.Pull}}
+
+	result, err := Execute(plans, localDir, c, state, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("Errors = %v, want empty", result.Errors)
+	}
+	if len(result.RevisionSkipped) != 1 || result.RevisionSkipped[0].Reason != "path_404" {
+		t.Errorf("RevisionSkipped = %+v, want one entry with reason=path_404", result.RevisionSkipped)
+	}
+}
+
+// 5xx and other retryable errors MUST stay in Errors so the runner
+// holds the cursor. Only 404 advances.
+func TestExecute_Pull_5xx_StaysInErrors(t *testing.T) {
+	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.WriteHeader(500)
+		}
+	})
+
+	localDir := t.TempDir()
+	state := testStateFromArchive(nil)
+	plans := []types.SyncPlan{{Path: "flaky.txt", Action: types.Pull, RevisionID: "rev-x"}}
+
+	result, err := Execute(plans, localDir, c, state, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Errorf("Errors = %v, want 1 (5xx must block cursor)", result.Errors)
+	}
+	if len(result.RevisionSkipped) != 0 {
+		t.Errorf("RevisionSkipped = %v, want empty for 5xx", result.RevisionSkipped)
 	}
 }
 
