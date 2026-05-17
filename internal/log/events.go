@@ -4,7 +4,7 @@
 // Sinks under sink/ fan the same record out to console, file, and Wails.
 //
 // Event names below are the canonical set. Filtering and color rules in
-// the GUI key off the prefix (sync., file., watch., oauth., service.).
+// the GUI key off the prefix (sync., file., dir., watch., oauth., service.).
 package log
 
 const (
@@ -13,6 +13,7 @@ const (
 	SyncError          = "sync.error"
 	SyncIdle           = "sync.idle"
 	SyncPlan           = "sync.plan"
+	SyncWarn           = "sync.warn"
 	SyncSkippedSummary = "sync.skipped_summary"
 	SyncSkipDegenerate = "sync.skip_degenerate"
 
@@ -22,6 +23,13 @@ const (
 	FileMove     = "file.move"
 	FileSkip     = "file.skip"
 	FileConflict = "file.conflict"
+
+	// Dir-event lifecycle and per-event mkdir. Per-file rename/delete
+	// produced by dir events are emitted as FileMove/FileDelete with
+	// the attr `kind: dir_event` so existing per-file filters still
+	// surface them.
+	DirEvent = "dir.event"
+	DirMkdir = "dir.mkdir"
 
 	ServiceStart = "service.start"
 	ServiceStop  = "service.stop"

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 )
 
 // ChunkedUploadThreshold is the file size above which chunked upload is used.
@@ -92,7 +94,12 @@ func executePushChunked(localPath, remoteKey, relPath string, totalSize int64, c
 				_ = c.CancelUpload(session.SessionID)
 				return fmt.Errorf("upload chunk %d: %w", chunkIndex, err)
 			}
-			fmt.Printf("  chunk %d/%d uploaded\n", chunkIndex+1, totalChunks)
+			slog.Default().Debug(slog2.FilePush,
+				"path", relPath,
+				"detail", "chunk_uploaded",
+				"chunk_index", chunkIndex+1,
+				"total_chunks", totalChunks,
+			)
 			chunkIndex++
 		}
 		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
