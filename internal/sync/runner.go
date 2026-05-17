@@ -62,7 +62,7 @@ func RunInitialSync(c *client.Client, localDir string, state *State, opts SyncOp
 	plans = NeutralizeLocalRemoteCaseCollisions(plans, localFiles, state.Files, caseInsensitive)
 	plans = MergeFolderDeletes(plans, localFiles, state.Files)
 
-	result, err := executePlans(plans, localDir, c, state, opts)
+	result, err := executePlans(plans, 0, localDir, c, state, opts)
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func RunIncrementalSync(c *client.Client, localDir string, state *State, opts Sy
 		}
 	}
 
-	dirOutcome, err := HandleIncrementalDirEvents(c, localDir, state, dirChanges)
+	dirOutcome, err := HandleIncrementalDirEvents(c, localDir, state, dirChanges, opts.logger())
 	if err != nil {
 		return fmt.Errorf("dir event handling: %w", err)
 	}
@@ -158,7 +158,7 @@ func RunIncrementalSync(c *client.Client, localDir string, state *State, opts Sy
 		opts.logger().Info(slog2.SyncIdle)
 	}
 
-	result, err := executePlans(plans, localDir, c, state, opts)
+	result, err := executePlans(plans, len(dirChanges), localDir, c, state, opts)
 	if err != nil {
 		return err
 	}
@@ -233,8 +233,15 @@ func reportCollisions(groups []CollisionGroup, state *State, opts SyncOptions) {
 
 // executePlans runs the max-delete safety check, prints plan summary,
 // and executes. Returns nil result when plans is empty.
-func executePlans(plans []types.SyncPlan, localDir string, c *client.Client, state *State, opts SyncOptions) (*ExecuteResult, error) {
-	if len(plans) == 0 {
+//
+// `dirEventCount` is the number of incoming dir-level change events
+// processed before this call. It is included in the sync.plan event so
+// dir-only batches (e.g. a folder rename that already applied inline
+// via expandArchiveMove and produced no executor plans) still surface
+// a sync.plan record — without it the 2026-05-10 incident silently
+// ran sync.done with no trace of the 3661-file move.
+func executePlans(plans []types.SyncPlan, dirEventCount int, localDir string, c *client.Client, state *State, opts SyncOptions) (*ExecuteResult, error) {
+	if len(plans) == 0 && dirEventCount == 0 {
 		return nil, nil
 	}
 
@@ -257,8 +264,13 @@ func executePlans(plans []types.SyncPlan, localDir string, c *client.Client, sta
 		"pull", counts[types.Pull],
 		"delete", deleteCount,
 		"conflict", counts[types.Conflict],
+		"dir_events", dirEventCount,
 		"dry_run", opts.DryRun,
 	)
+
+	if len(plans) == 0 {
+		return nil, nil
+	}
 
 	result, err := executeWithLogger(plans, localDir, c, state, opts.DryRun, opts.logger())
 	if err != nil {

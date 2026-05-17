@@ -31,7 +31,7 @@ func expandArchiveDelete(
 		if hashErr == nil && localHash != fs.LocalHash {
 			action = types.PreserveLocalRename
 		}
-		plans = append(plans, types.SyncPlan{Path: path, Action: action})
+		plans = append(plans, types.SyncPlan{Path: path, Action: action, Origin: "dir_event"})
 	}
 
 	fsPaths, err := walkLocalUnderPrefix(localDir, prefix)
@@ -45,6 +45,7 @@ func expandArchiveDelete(
 		plans = append(plans, types.SyncPlan{
 			Path:   path,
 			Action: types.PreserveLocalRename,
+			Origin: "dir_event",
 		})
 	}
 	return plans, nil

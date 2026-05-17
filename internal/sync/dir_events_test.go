@@ -167,7 +167,7 @@ func TestExpandArchiveMove_RenamesUnchangedFiles(t *testing.T) {
 		"old/a.txt": {LocalHash: h, ContentVersion: 1},
 	}
 
-	plans, mutated, err := expandArchiveMove(testStateFromArchive(archive), dir, "old/", "new/")
+	plans, mutated, err := expandArchiveMove(testStateFromArchive(archive), nil, dir, "old/", "new/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestExpandArchiveMove_LocalEditedBecomesPreserveRename(t *testing.T) {
 		"old/a.txt": {LocalHash: "h-stale"},
 	}
 
-	plans, _, err := expandArchiveMove(testStateFromArchive(archive), dir, "old/", "new/")
+	plans, _, err := expandArchiveMove(testStateFromArchive(archive), nil, dir, "old/", "new/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestExpandArchiveMove_LocalOnlyDescendantIsRenamed(t *testing.T) {
 		"old/tracked.txt": {LocalHash: h},
 	}
 
-	_, mutated, err := expandArchiveMove(testStateFromArchive(archive), dir, "old/", "new/")
+	_, mutated, err := expandArchiveMove(testStateFromArchive(archive), nil, dir, "old/", "new/")
 	if err != nil {
 		t.Fatal(err)
 	}

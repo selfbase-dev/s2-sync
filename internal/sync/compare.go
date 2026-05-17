@@ -1,9 +1,10 @@
 package sync
 
 import (
-	"fmt"
+	"log/slog"
 	"sort"
 
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -85,7 +86,11 @@ func CompareIncremental(
 	safeKey := func(p string) (string, bool) {
 		k := NormalizePath(p)
 		if !isSafeRelativePath(k) {
-			fmt.Printf("warning: skipping unsafe remote path: %s\n", p)
+			slog.Default().Warn(slog2.SyncWarn,
+				"reason", "unsafe_path_skipped",
+				"source", "remote_change",
+				"path", p,
+			)
 			return "", false
 		}
 		return k, true

@@ -83,13 +83,23 @@ func execute(
 	deps executeDeps,
 ) (*ExecuteResult, error) {
 	result := &ExecuteResult{}
-	log := deps.log()
+	baseLog := deps.log()
 
 	for _, plan := range plans {
 		localPath, err := safeJoin(localRoot, plan.Path)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("unsafe plan path %s: %w", plan.Path, err))
 			continue
+		}
+		// Tag every per-file event with the plan's origin (e.g.
+		// "dir_event") so dir-driven rename / delete fan-out is
+		// traceable. Per-event sub-classification uses the "detail"
+		// attr (DeleteRemoteDir → detail=dir, preserve-rename →
+		// detail=preserve_local_rename) to keep "kind" reserved for
+		// the upstream classifier.
+		log := baseLog
+		if plan.Origin != "" {
+			log = baseLog.With("kind", plan.Origin)
 		}
 		remoteKey := plan.Path
 
@@ -186,7 +196,7 @@ func execute(
 			prefix := plan.Path + "/"
 			if dryRun {
 				n := countFilesUnderPrefix(state.Files, prefix)
-				log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote", "kind", "dir", "count", n, "dry_run", true)
+				log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote", "detail", "dir", "count", n, "dry_run", true)
 				result.Deleted += n
 				continue
 			}
@@ -200,7 +210,7 @@ func execute(
 			}
 			n := state.DeletePrefix(prefix)
 			result.Deleted += n
-			log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote", "kind", "dir", "count", n)
+			log.Info(slog2.FileDelete, "path", plan.Path, "side", "remote", "detail", "dir", "count", n)
 
 		case types.Conflict:
 			if dryRun {
@@ -216,11 +226,13 @@ func execute(
 
 		case types.PreserveLocalRename:
 			if dryRun {
-				log.Info(slog2.FileConflict, "path", plan.Path, "kind", "preserve_local_rename", "dry_run", true)
+				log.Info(slog2.FileConflict, "path", plan.Path, "detail", "preserve_local_rename", "dry_run", true)
 				result.Conflicts++
 				continue
 			}
-			if err := executePreserveLocalRename(localPath, plan.Path, state); err != nil {
+			// Pass the per-plan logger so executePreserveLocalRename
+			// inherits origin / kind context (e.g. dir_event).
+			if err := executePreserveLocalRename(log, localPath, plan.Path, state); err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("preserve %s: %w", plan.Path, err))
 				continue
 			}

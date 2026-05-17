@@ -15,9 +15,11 @@ package sync
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
+	slog2 "github.com/selfbase-dev/s2-sync/internal/log"
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
@@ -35,7 +37,11 @@ func FetchRemoteMap(c *client.Client, path string) (map[string]types.RemoteFile,
 		return nil, err
 	}
 
-	fmt.Printf("Subtree too large for atomic snapshot, splitting: %s\n", pathOrRoot(path))
+	slog.Default().Info(slog2.SyncWarn,
+		"reason", "subtree_too_large_for_atomic_snapshot",
+		"path", pathOrRoot(path),
+		"fallback", "listdir_recursive",
+	)
 	return fetchRemoteMapViaListDir(c, path)
 }
 
@@ -60,7 +66,11 @@ func fetchRemoteMapViaListDir(c *client.Client, path string) (map[string]types.R
 		}
 
 		if !isSafeRelativePath(fullPath) {
-			fmt.Printf("warning: skipping unsafe path: %s\n", fullPath)
+			slog.Default().Warn(slog2.SyncWarn,
+				"reason", "unsafe_path_skipped",
+				"source", "listdir",
+				"path", fullPath,
+			)
 			continue
 		}
 
