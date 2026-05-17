@@ -71,46 +71,6 @@ func TestFoldKey_CaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestDetectCollisions_Groups(t *testing.T) {
-	got := DetectCollisions([]string{"file.txt", "File.txt", "other.txt", "OTHER.TXT"})
-	if len(got) != 2 {
-		t.Errorf("expected 2 groups, got %d: %+v", len(got), got)
-	}
-	for k, paths := range got {
-		if len(paths) != 2 {
-			t.Errorf("group %q has %d members, want 2", k, len(paths))
-		}
-	}
-}
-
-func TestDetectCollisions_SortedDeterministic(t *testing.T) {
-	input := []string{"File.txt", "file.txt", "FILE.TXT"}
-	a := DetectCollisions(input)
-	b := DetectCollisions(input)
-	for k := range a {
-		if !sort.StringsAreSorted(a[k]) {
-			t.Errorf("group %q not sorted: %v", k, a[k])
-		}
-		if len(a[k]) != len(b[k]) {
-			t.Fatalf("non-deterministic length for %q", k)
-		}
-		for i := range a[k] {
-			if a[k][i] != b[k][i] {
-				t.Errorf("non-deterministic order at %q[%d]: %q vs %q", k, i, a[k][i], b[k][i])
-			}
-		}
-	}
-}
-
-func TestDetectCollisions_NoCollision(t *testing.T) {
-	got := DetectCollisions([]string{"a.txt", "b.txt", "c.txt"})
-	for k, paths := range got {
-		if len(paths) != 1 {
-			t.Errorf("unexpected collision for %q: %v", k, paths)
-		}
-	}
-}
-
 func TestDetectMovePairs_CaseOnly(t *testing.T) {
 	archive := map[string]string{"file.txt": "hash1", "other.txt": "hash2"}
 	local := map[string]string{"File.txt": "hash1", "other.txt": "hash2"}
@@ -203,6 +163,14 @@ func TestNormalizeRemoteMap_CaseInsensitive(t *testing.T) {
 	}
 	if len(collisions[0].Paths) != 2 {
 		t.Errorf("collision group should have 2 paths, got %d: %v", len(collisions[0].Paths), collisions[0].Paths)
+	}
+	// Paths must be sorted UTF-8 bytewise (deterministic tie-break).
+	wantPaths := []string{"File.txt", "file.txt"}
+	for i, want := range wantPaths {
+		if i >= len(collisions[0].Paths) || collisions[0].Paths[i] != want {
+			t.Errorf("collision paths = %v, want %v", collisions[0].Paths, wantPaths)
+			break
+		}
 	}
 	// Lex-first wins: "File.txt" < "file.txt"
 	if _, ok := filtered["File.txt"]; !ok {
