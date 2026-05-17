@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"runtime"
 	"time"
 
 	"fyne.io/systray"
@@ -49,8 +50,13 @@ func onTrayReady(app *App) {
 	// block — build the menu and hand click handling to a goroutine,
 	// then return so the run loop keeps pumping.
 	// Windows tray draws the icon image, not the title text, so SetIcon
-	// is mandatory there. SetTitle is still set for the macOS menu bar.
-	systray.SetIcon(trayIcon)
+	// is mandatory there. On macOS the bundled icon is the colored Dock
+	// asset, which clashes with the menu bar's monochrome convention and
+	// stacks next to the title text — show title-only until proper
+	// template icons land.
+	if runtime.GOOS != "darwin" {
+		systray.SetIcon(trayIcon)
+	}
 	systray.SetTitle("S2")
 	systray.SetTooltip("S2 Sync — idle")
 
