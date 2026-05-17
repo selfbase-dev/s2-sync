@@ -27,7 +27,14 @@ export const MAX_LOG_LINES = 200;
 
 export const STATUS_LABEL: Record<Status, string> = {
   idle: "Idle",
-  running: "Syncing",
+  running: "Synced",
   stopping: "Stopping…",
   error: "Error",
 };
+
+// Running splits on the orthogonal `syncing` bool: true while a sync run
+// is in flight, false once it finishes. Everything else uses STATUS_LABEL.
+export function statusLabel(state: StateInfo): string {
+  if (state.status === "running" && state.syncing) return "Syncing…";
+  return STATUS_LABEL[state.status];
+}

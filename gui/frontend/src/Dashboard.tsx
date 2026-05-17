@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { OpenFolder } from "../wailsjs/go/main/App";
-import { LogRecord, STATUS_LABEL, StateInfo, Status } from "./types";
+import { LogRecord, statusLabel, StateInfo, Status } from "./types";
 
 interface Props {
   endpoint: string;
@@ -65,7 +65,7 @@ export function Dashboard({
         <div className="card status-card">
           <div className={`status-dot ${status}`} />
           <div className="status-info">
-            <div className="status-label">{STATUS_LABEL[status]}</div>
+            <div className="status-label">{statusLabel(state)}</div>
             <div className="status-meta">
               {lastSync ? `Last sync ${lastSync}` : "Not synced yet"}
             </div>
