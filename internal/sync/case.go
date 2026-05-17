@@ -38,8 +38,9 @@ func NormalizePath(p string) string {
 // NormalizePath + Unicode-aware lowercase.
 //
 // Paths with the same FoldKey are indistinguishable on case-insensitive
-// filesystems (Mac, Windows). Used to group collisions (DetectCollisions)
-// and detect case-only renames (DetectMovePairs).
+// filesystems (Mac, Windows). Walk and NormalizeRemoteMap use it to
+// bucket local/remote collision candidates, and DetectMovePairs uses it
+// to detect case-only renames.
 //
 // Limitation: strings.ToLower uses simple Unicode case mapping.
 // Locale-specific folds (Turkish dotless-I, Greek final sigma) may miss
@@ -47,26 +48,6 @@ func NormalizePath(p string) string {
 // which is correct, just wasteful).
 func FoldKey(p string) string {
 	return strings.ToLower(NormalizePath(p))
-}
-
-// DetectCollisions groups paths by FoldKey. Groups with >1 member are
-// collisions that the caller must handle (typically skip + warning
-// , not stop the whole sync).
-//
-// Returned paths are NormalizePath-canonical and sorted UTF-8 bytewise
-// lexicographic within each group — this determinism is what makes
-// tie-break stable across devices and invocations (deterministic tie-break).
-func DetectCollisions(paths []string) map[string][]string {
-	groups := make(map[string][]string)
-	for _, p := range paths {
-		canonical := NormalizePath(p)
-		key := FoldKey(p)
-		groups[key] = append(groups[key], canonical)
-	}
-	for k := range groups {
-		sort.Strings(groups[k])
-	}
-	return groups
 }
 
 // MoveCandidate describes a detected case-only rename: archive had From,
