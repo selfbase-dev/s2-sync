@@ -1,14 +1,19 @@
-package auth
+//go:build testseam
 
 // This file exposes a minimal seam so external test packages can wire
 // an in-memory keyring without depending on the OS keychain. The
 // helpers here are intended only for `*_test.go` callers in other
 // packages; production code goes through SetKeyring / GetKeyring /
-// DeleteKeyring. They live in a non-_test file because Go's
-// `export_test.go` mechanism is invisible to external test packages,
-// and routing every external smoke through a separate sub-package
-// would require even more public surface to break the import cycle
-// (client → auth → would-be-helper).
+// DeleteKeyring.
+//
+// Gated behind `//go:build testseam` so the helpers compile-exclude
+// from release binaries — run tests with `go test -tags=testseam ./...`.
+// Go's `export_test.go` mechanism would scope these to `internal/auth`'s
+// own tests only; we need them visible to `internal/sync`'s external
+// smoke test, which a build tag accomplishes without exporting any
+// production-visible mutation hook.
+
+package auth
 
 // inMemoryKeyring is a process-local keyringStore used by tests.
 type inMemoryKeyring struct{ data string }

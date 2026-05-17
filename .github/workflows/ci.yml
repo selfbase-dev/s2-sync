@@ -19,5 +19,9 @@ jobs:
       # frontend build. The GUI is verified in its own build workflow.
       # CLI, sync core, and desktop service layer all compile/test
       # standalone.
-      - run: go test ./cmd/... ./internal/...
+      # Run tests with the `testseam` tag so the auth test helpers
+      # (internal/auth/testing.go) compile in. The build step below
+      # intentionally OMITS the tag — that's the contract: release
+      # binaries must not contain SwapKeyringForTesting et al.
+      - run: go test -tags=testseam ./cmd/... ./internal/...
       - run: go build -o /dev/null ./cmd/... ./internal/...
