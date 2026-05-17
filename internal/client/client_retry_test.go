@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,6 +119,13 @@ func TestClient_RetriesOnConnectionError(t *testing.T) {
 func TestClient_ContextCancelAbortsRequest(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
+	// Guard close(release) with sync.Once so future edits that need to
+	// release the handler mid-test (e.g. before cancel) can't panic the
+	// cleanup with a second close. httptest.Server.Close blocks until
+	// handlers return, so the cleanup MUST close release before
+	// srv.Close — keep that order.
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("ETag", `"1"`)
@@ -126,7 +134,7 @@ func TestClient_ContextCancelAbortsRequest(t *testing.T) {
 		<-release
 	}))
 	t.Cleanup(func() {
-		close(release)
+		releaseHandler()
 		srv.Close()
 	})
 
