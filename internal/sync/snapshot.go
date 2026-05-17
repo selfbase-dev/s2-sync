@@ -2,6 +2,7 @@ package sync
 
 import (
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/selfbase-dev/s2-sync/internal/client"
@@ -9,10 +10,10 @@ import (
 	"github.com/selfbase-dev/s2-sync/internal/types"
 )
 
-// SnapshotToRemoteFiles projects /api/v1/snapshot items into the file-centric
-// map used by Compare / CompareIncremental. Directory items (Type=="dir")
-// are dropped — empty dirs are reconstructed implicitly by os.MkdirAll
-// when pulling files into them (ADR 0040 §その他 mkdir).
+// SnapshotToRemoteFiles projects /api/v1/snapshot items into the
+// file-centric map used by Compare / CompareIncremental. Directory
+// items are filtered out — the dir lifecycle is owned by
+// SnapshotToRemoteDirs so the file pipeline stays single-purpose.
 //
 // Paths are normalised to the slash-free keys used throughout the sync
 // pipeline (stripping the leading "/" that the server adds via
@@ -53,6 +54,45 @@ func SnapshotToRemoteFiles(items []types.SnapshotItem) map[string]types.RemoteFi
 			ContentVersion: it.ContentVersion,
 		}
 	}
+	return out
+}
+
+// SnapshotToRemoteDirs returns the set of directory paths present in
+// a snapshot response. Used to materialize empty folders locally that
+// would otherwise vanish: the file-centric pipeline implicitly creates
+// dirs whose path is the parent of a file via os.MkdirAll, but a live
+// directory row with no file children (the user just clicked
+// "new folder" on the web UI) has no file to ride into existence on.
+//
+// Paths use the same canonical form as SnapshotToRemoteFiles: leading
+// "/" stripped, NFC, traversal-unsafe entries dropped. Returns a sorted
+// slice so callers (executor plans) get deterministic order; parents
+// come before children which lets a single MkdirAll create the chain.
+func SnapshotToRemoteDirs(items []types.SnapshotItem) []string {
+	var out []string
+	for _, it := range items {
+		if it.Type != "dir" {
+			continue
+		}
+		key := strings.TrimPrefix(it.Path, "/")
+		key = strings.TrimSuffix(key, "/")
+		if key == "" {
+			// Scope root — never emit MkdirLocal for it. The sync root
+			// already exists; the user wouldn't expect us to recreate
+			// it if it's missing.
+			continue
+		}
+		if !isSafeRelativePath(key) {
+			slog.Default().Warn(slog2.SyncWarn,
+				"reason", "unsafe_path_skipped",
+				"source", "snapshot_dir",
+				"path", it.Path,
+			)
+			continue
+		}
+		out = append(out, key)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -104,4 +144,21 @@ func FetchSnapshotAsRemoteFiles(c *client.Client, path string) (map[string]types
 		return nil, "", err
 	}
 	return SnapshotToRemoteFiles(resp.Items), resp.Cursor, nil
+}
+
+// FetchSnapshotSplit returns both the file map and the live directory
+// list from a snapshot in a single round-trip. The split lets the
+// caller drive os.MkdirAll for dir-only nodes (empty folders the user
+// created on the web UI) without conflating them with file pulls.
+//
+// Returns a zero-value cursor only when the server response itself
+// carries one — the file-only sibling (FetchSnapshotAsRemoteFiles)
+// keeps its existing contract for callers that don't yet need dir
+// materialization.
+func FetchSnapshotSplit(c *client.Client, path string) (map[string]types.RemoteFile, []string, string, error) {
+	resp, err := c.Snapshot(path)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return SnapshotToRemoteFiles(resp.Items), SnapshotToRemoteDirs(resp.Items), resp.Cursor, nil
 }

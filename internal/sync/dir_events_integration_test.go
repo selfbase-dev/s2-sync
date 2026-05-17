@@ -103,16 +103,33 @@ func TestHandleIncrementalDirEvents_DeleteInScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outcome.ArchiveWalkPlans) != 2 {
-		t.Fatalf("plans = %d, want 2", len(outcome.ArchiveWalkPlans))
+	// 2 DeleteLocal (vacation/a.jpg, vacation/sub/b.jpg) + 1 RmdirLocal
+	// for the prefix the change event names ("vacation"). The per-file
+	// expansion does NOT emit per-intermediate-dir rmdirs because the
+	// rmdir runs non-recursively at execute time and the executor falls
+	// back gracefully when the inner dir is still populated by ENOTEMPTY.
+	if len(outcome.ArchiveWalkPlans) != 3 {
+		t.Fatalf("plans = %d, want 3 (2 DeleteLocal + 1 RmdirLocal)", len(outcome.ArchiveWalkPlans))
 	}
+	deleteCount, rmdirCount := 0, 0
 	for _, p := range outcome.ArchiveWalkPlans {
-		if p.Action != types.DeleteLocal {
-			t.Errorf("plan %s: action = %v, want DeleteLocal", p.Path, p.Action)
+		switch p.Action {
+		case types.DeleteLocal:
+			deleteCount++
+			if p.Path == "photos/keep.jpg" {
+				t.Errorf("photos/keep.jpg should not be in plans")
+			}
+		case types.RmdirLocal:
+			rmdirCount++
+			if p.Path != "vacation" {
+				t.Errorf("rmdir plan path = %q, want %q", p.Path, "vacation")
+			}
+		default:
+			t.Errorf("plan %s: unexpected action %v", p.Path, p.Action)
 		}
-		if p.Path == "photos/keep.jpg" {
-			t.Errorf("photos/keep.jpg should not be in plans")
-		}
+	}
+	if deleteCount != 2 || rmdirCount != 1 {
+		t.Errorf("deleteCount=%d (want 2), rmdirCount=%d (want 1)", deleteCount, rmdirCount)
 	}
 }
 

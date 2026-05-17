@@ -187,11 +187,16 @@ func TestHandleIncrementalDirEvents_LoggingDeleteEmitsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(outcome.ArchiveWalkPlans) != 1 {
-		t.Fatalf("got %d plans, want 1", len(outcome.ArchiveWalkPlans))
+	// Expect one DeleteLocal for the file plus one RmdirLocal post-action
+	// for the now-empty directory shell. Both are born of the dir event
+	// and must carry Origin="dir_event" so observers can correlate.
+	if len(outcome.ArchiveWalkPlans) != 2 {
+		t.Fatalf("got %d plans, want 2 (1 DeleteLocal + 1 RmdirLocal)", len(outcome.ArchiveWalkPlans))
 	}
-	if outcome.ArchiveWalkPlans[0].Origin != "dir_event" {
-		t.Errorf("plan origin = %q, want dir_event", outcome.ArchiveWalkPlans[0].Origin)
+	for i, p := range outcome.ArchiveWalkPlans {
+		if p.Origin != "dir_event" {
+			t.Errorf("plans[%d].Origin = %q, want dir_event", i, p.Origin)
+		}
 	}
 
 	lifecycle := cap.eventsWithName(slog2.DirEvent)
@@ -214,8 +219,10 @@ func TestHandleIncrementalDirEvents_LoggingDeleteEmitsLifecycle(t *testing.T) {
 	if !hasApplied || !hasDone {
 		t.Errorf("lifecycle missing applied/done: %+v", lifecycle)
 	}
-	if expandedCount != 1 {
-		t.Errorf("expanded_count = %d, want 1", expandedCount)
+	// expanded_count covers the per-file delete plus the RmdirLocal
+	// post-action emitted by the symmetric dir lifecycle.
+	if expandedCount != 2 {
+		t.Errorf("expanded_count = %d, want 2", expandedCount)
 	}
 }
 

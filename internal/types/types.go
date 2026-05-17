@@ -42,6 +42,8 @@ const (
 	MoveApply        // pull side: server already moved, apply locally (os.Rename)
 	SkipCaseConflict // terminal: file skipped due to case/unicode collision
 	DeleteRemoteDir  // single DELETE on a directory path; server cascades soft-delete to descendants
+	MkdirLocal       // os.MkdirAll for a remote directory whose row is live (no file payload)
+	RmdirLocal       // non-recursive os.Remove(dir) after all per-file deletes under the prefix succeeded
 )
 
 func (a SyncAction) String() string {
@@ -68,6 +70,10 @@ func (a SyncAction) String() string {
 		return "skip-case-conflict"
 	case DeleteRemoteDir:
 		return "delete-remote-dir"
+	case MkdirLocal:
+		return "mkdir-local"
+	case RmdirLocal:
+		return "rmdir-local"
 	default:
 		return "unknown"
 	}
